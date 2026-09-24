@@ -1,0 +1,1 @@
+"""AcadAssist application package."""

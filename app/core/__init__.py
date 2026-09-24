@@ -1,0 +1,1 @@
+"""AcadAssist Core Package."""
