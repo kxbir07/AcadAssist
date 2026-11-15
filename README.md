@@ -159,7 +159,7 @@ The React frontend will be accessible at `http://localhost:5173`.
 | **Document Storage** | `LocalStorageService` (`storage/`) | `AzureBlobStorage` (`AZURE_STORAGE_CONTAINER`) |
 | **Search Engine** | `LocalHybridSearchIndex` (BM25 + Cosine) | `AzureSearchService` (`AZURE_SEARCH_ENDPOINT`) |
 | **Embeddings** | `LocalDeterministicEmbeddingProvider` | Azure OpenAI (`text-embedding-3-small`) |
-| **Agent Execution** | `local_orchestrator` | `cloud_foundry` (`FOUNDRY_PROJECT_ENDPOINT`) ||
+| **Agent Execution** | `local_orchestrator` | `cloud_foundry` (`FOUNDRY_PROJECT_ENDPOINT`) |
 
 ---
 
