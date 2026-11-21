@@ -30,6 +30,7 @@ class User(Base):
     academic_level = Column(String(64), nullable=True, default="Undergraduate")
     field_of_study = Column(String(128), nullable=True, default="Computer Science")
     bio = Column(Text, nullable=True)
+    workspace_state = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime,

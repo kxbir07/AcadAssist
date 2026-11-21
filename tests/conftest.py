@@ -42,12 +42,39 @@ from app.main import app
 
 @pytest.fixture(scope="session", autouse=True)
 def test_environment():
-    """Ensure tests run with test environment variables."""
+    """Ensure tests run with isolated test environment variables and no unintended cloud calls."""
+    saved = {
+        "ENVIRONMENT": settings.ENVIRONMENT,
+        "STORAGE_LOCAL_DIR": settings.STORAGE_LOCAL_DIR,
+        "FOUNDRY_PROJECT_ENDPOINT": settings.FOUNDRY_PROJECT_ENDPOINT,
+        "AZURE_OPENAI_API_KEY": settings.AZURE_OPENAI_API_KEY,
+        "AZURE_API_KEY": settings.AZURE_API_KEY,
+        "AZURE_OPENAI_ENDPOINT": settings.AZURE_OPENAI_ENDPOINT,
+        "AZURE_ENDPOINT": settings.AZURE_ENDPOINT,
+        "OPENAI_API_KEY": settings.OPENAI_API_KEY,
+        "AZURE_STORAGE_ACCOUNT": settings.AZURE_STORAGE_ACCOUNT,
+        "AZURE_STORAGE_CONNECTION_STRING": settings.AZURE_STORAGE_CONNECTION_STRING,
+        "AZURE_SEARCH_ENDPOINT": settings.AZURE_SEARCH_ENDPOINT,
+        "AZURE_SEARCH_KEY": settings.AZURE_SEARCH_KEY,
+    }
     settings.ENVIRONMENT = "test"
+    settings.FOUNDRY_PROJECT_ENDPOINT = None
+    settings.AZURE_OPENAI_API_KEY = None
+    settings.AZURE_API_KEY = None
+    settings.AZURE_OPENAI_ENDPOINT = None
+    settings.AZURE_ENDPOINT = None
+    settings.OPENAI_API_KEY = None
+    settings.AZURE_STORAGE_ACCOUNT = None
+    settings.AZURE_STORAGE_CONNECTION_STRING = None
+    settings.AZURE_SEARCH_ENDPOINT = None
+    settings.AZURE_SEARCH_KEY = None
+
     temp_dir = tempfile.mkdtemp(prefix="acadassist_test_storage_")
     settings.STORAGE_LOCAL_DIR = temp_dir
     yield temp_dir
     shutil.rmtree(temp_dir, ignore_errors=True)
+    for k, v in saved.items():
+        setattr(settings, k, v)
 
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -155,5 +182,3 @@ def auth_headers(db_session):
         token = create_access_token({"sub": user_id})
         return {"Authorization": f"Bearer {token}"}
     return _make
-
-

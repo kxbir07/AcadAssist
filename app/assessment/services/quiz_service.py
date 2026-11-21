@@ -203,9 +203,9 @@ class QuizService:
                     question_type=question.question_type,
                     difficulty=question.difficulty,
                     options=question.options,
-                    explanation=None,
+                    explanation=question.explanation,
                     source_chunk_id=question.source_chunk_id,
-                    correct_answer=None,
+                    correct_answer=question.correct_answer,
                 )
             )
 
@@ -243,9 +243,9 @@ class QuizService:
                 question_type=q.question_type,
                 difficulty=q.difficulty,
                 options=q.options,
-                explanation=None,
+                explanation=q.explanation,
                 source_chunk_id=q.source_chunk_id,
-                correct_answer=None,
+                correct_answer=q.correct_answer,
             )
             for q in quiz.questions
         ]

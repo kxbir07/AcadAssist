@@ -12,6 +12,9 @@ from app.models.document import Chunk
 
 logger = logging.getLogger(__name__)
 
+# Cache connection failure in non-production to avoid repeated Entra ID / network hangs
+_azure_search_unreachable: bool = False
+
 
 class LocalHybridSearchIndex:
     """In-memory hybrid search index providing exact BM25 + cosine vector search for dev/testing."""
@@ -162,28 +165,33 @@ class AzureSearchService:
     """Azure AI Search service managing knowledge indexing and hybrid retrieval."""
 
     def __init__(self):
-        self.endpoint = settings.AZURE_SEARCH_ENDPOINT or settings.AZURE_ENDPOINT
+        global _azure_search_unreachable
+        self.endpoint = settings.azure_search_endpoint or settings.AZURE_ENDPOINT
         self.api_key = settings.AZURE_SEARCH_KEY or settings.AZURE_API_KEY
         self.index_name = settings.AZURE_SEARCH_INDEX_NAME
         self.dimensions = settings.EMBEDDING_DIMENSIONS
         self.local_index: LocalHybridSearchIndex | None = None
         self.search_client = None
 
-        has_credentials = bool(self.endpoint and (self.api_key or settings.AZURE_SEARCH_ENDPOINT))
+        if settings.is_test():
+            self.local_index = LocalHybridSearchIndex()
+            return
+
+        has_credentials = bool(self.endpoint and (self.api_key or settings.azure_search_endpoint))
 
         if settings.is_production():
             if not self.endpoint:
                 raise ValueError("AZURE_SEARCH_ENDPOINT is required in production.")
             self._init_azure_client()
         else:
-            if has_credentials:
+            if has_credentials and not _azure_search_unreachable:
                 try:
                     self._init_azure_client()
                 except Exception as e:
+                    _azure_search_unreachable = True
                     logger.warning(f"Could not connect to Azure AI Search, using local fallback: {e}")
                     self.local_index = LocalHybridSearchIndex()
             else:
-                logger.info("Azure Search credentials not provided. Using local hybrid search index for dev/testing.")
                 self.local_index = LocalHybridSearchIndex()
 
     def _init_azure_client(self):
@@ -210,9 +218,6 @@ class AzureSearchService:
 
         index_client = SearchIndexClient(endpoint=self.endpoint, credential=credential)
 
-        # Ensure the index exists and has the authorization fields required by RAG.
-        # `visibility` is part of the security filter, so an existing index created
-        # before this field was introduced must be updated before it is used.
         try:
             existing_index = index_client.get_index(self.index_name)
         except Exception:
@@ -309,7 +314,6 @@ class AzureSearchService:
             self.local_index.index_documents(documents)
             return
 
-        # Upload in batches to Azure Search
         batch_size = 500
         for i in range(0, len(documents), batch_size):
             batch = documents[i : i + batch_size]
@@ -321,7 +325,6 @@ class AzureSearchService:
             self.local_index.delete_by_document_id(document_id, user_id)
             return
 
-        # Query chunk IDs for document_id and user_id to delete
         filter_expr = f"document_id eq '{document_id}' and user_id eq '{user_id}'"
         results = self.search_client.search(
             search_text="",
@@ -373,7 +376,6 @@ class AzureSearchService:
 
         from azure.search.documents.models import VectorizedQuery
 
-        # Build server-side OData security filter: owner user_id or public visibility
         filter_parts = [f"(user_id eq '{user_id}' or visibility eq 'public')"]
         if document_id:
             filter_parts.append(f"document_id eq '{document_id}'")

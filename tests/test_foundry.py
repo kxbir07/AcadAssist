@@ -19,20 +19,10 @@ def test_foundry_manager_initialization():
 
 def test_foundry_manager_missing_endpoint_error():
     """Verify error when accessing client without configured endpoint."""
-    with patch("app.azure.foundry.get_settings") as mock_get_settings:
-        mock_settings = MagicMock()
-        mock_settings.foundry_project_endpoint = None
-        mock_settings.AZURE_OPENAI_API_KEY = None
-        mock_settings.AZURE_API_KEY = None
-        mock_settings.AZURE_OPENAI_ENDPOINT = None
-        mock_settings.AZURE_ENDPOINT = None
-        mock_settings.OPENAI_API_KEY = None
-        mock_get_settings.return_value = mock_settings
-
-        manager = FoundryProjectManager(endpoint=None)
-        assert manager.is_configured is False
-        with pytest.raises(ValueError, match="Foundry Project endpoint is not configured"):
-            manager.get_project_client()
+    manager = FoundryProjectManager(endpoint=None)
+    assert manager.is_configured is False
+    with pytest.raises(ValueError, match="Foundry Project endpoint is not configured"):
+        manager.get_project_client()
 
 
 @patch("app.azure.foundry.AIProjectClient")

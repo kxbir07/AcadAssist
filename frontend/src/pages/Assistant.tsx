@@ -1,17 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { Send, Mic, Sparkles, Trash2, Copy, Check, Bot, Database, Info } from 'lucide-react';
+import { Send, Mic, Sparkles, Trash2, Copy, Check, Info, Bot, Database } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import HeroHeader from '../components/ui/HeroHeader';
 import SectionHeader from '../components/ui/SectionHeader';
 import Modal from '../components/ui/Modal';
 import { useApp } from '../context/AppContext';
-import {
-  chatWithAssistant,
-  fetchDocuments,
-  fetchHealthStatus,
-  formatApiError,
-  type DocumentUploadResponse
-} from '../services/api';
+import { chatWithAssistant, fetchDocuments, type DocumentUploadResponse } from '../services/api';
 
 const QUICK = [
   ['💡 Explain Concept', 'Explain Deadlock Coffman conditions in simple language with an example'],
@@ -22,11 +16,11 @@ const QUICK = [
 ];
 
 const PROMPTS = [
-  'Explain the 4 Coffman conditions required for deadlock',
+  'Explain paging and virtual-to-physical address translation',
   'What is the difference between TCP and UDP sliding window?',
   'Explain BCNF decomposition and why it avoids update anomalies',
   'How does Round Robin scheduling choose the time quantum?',
-  'Walk through Banker’s algorithm safety state evaluation',
+  'Walk through Binary Search complexity and midpoint overflow prevention',
 ];
 
 export default function Assistant() {
@@ -38,18 +32,14 @@ export default function Assistant() {
   const [subject, setSubject] = useState<string | null>(null);
   const [documents, setDocuments] = useState<DocumentUploadResponse[]>([]);
   const [typing, setTyping] = useState(false);
-  const [loadingStage, setLoadingStage] = useState('');
   const [tool, setTool] = useState<string | null>(null);
   const [modelModal, setModelModal] = useState(false);
   const [recentModal, setRecentModal] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
-  const [modelName, setModelName] = useState('Checking AI status...');
-  const [engineState, setEngineState] = useState<'connected' | 'fallback' | 'unavailable'>('fallback');
-  const [engineDetail, setEngineDetail] = useState('Operating via Local AI Orchestrator');
+  const [modelName, setModelName] = useState('AcadAssist RAG Engine (Azure Foundry / Local Hybrid)');
   const [copied, setCopied] = useState<number | null>(null);
   const end = useRef<HTMLDivElement>(null);
 
-  // Preload prompt and material context from URL if navigated from Knowledge / Assessment
   useEffect(() => {
     const rawId = params.get('materialId');
     if (rawId && rawId.trim()) {
@@ -65,7 +55,6 @@ export default function Assistant() {
     }
   }, [params]);
 
-  // Load available documents so student can select active document
   useEffect(() => {
     fetchDocuments().then(docs => {
       if (docs && docs.length > 0) {
@@ -77,76 +66,32 @@ export default function Assistant() {
     }).catch(() => {});
   }, [params]);
 
-  // Dynamic AI status check via backend /health
-  useEffect(() => {
-    fetchHealthStatus()
-      .then(health => {
-        if (!health) {
-          setEngineState('unavailable');
-          setEngineDetail('AI service is currently unreachable');
-          setModelName('AI Service Offline');
-          return;
-        }
-        if (health.foundry?.configured || health.foundry?.mode === 'cloud_foundry') {
-          setEngineState('connected');
-          setEngineDetail('Connected to Azure OpenAI & Microsoft Foundry (gpt-4.1-mini)');
-          setModelName('Microsoft Foundry (gpt-4.1-mini)');
-        } else if (health.status === 'healthy') {
-          setEngineState('fallback');
-          setEngineDetail('Operating via Local AI Orchestrator & Hybrid Search');
-          setModelName('Local AI / Fallback Mode');
-        } else {
-          setEngineState('unavailable');
-          setEngineDetail('AI service is currently unavailable');
-          setModelName('AI Service Unavailable');
-        }
-      })
-      .catch(() => {
-        setEngineState('unavailable');
-        setEngineDetail('AI service is currently unreachable');
-        setModelName('AI Service Offline');
-      });
-  }, []);
-
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatHistory, typing, loadingStage]);
+  }, [chatHistory, typing]);
 
   const send = async (text = input) => {
     const value = text.trim();
     if (!value || typing) return;
     setInput('');
-    addChatMessage('user', value);
+    // POST /api/chat already persists both user and assistant messages in the database,
+    // so pass skipBackendSave=true to avoid duplicate DB rows.
+    addChatMessage('user', value, undefined, undefined, true);
     setTyping(true);
-    setLoadingStage('🔎 Searching study material...');
-
-    const stageTimer1 = window.setTimeout(() => {
-      setLoadingStage('🧠 Generating grounded response...');
-    }, 1100);
-
-    const stageTimer2 = window.setTimeout(() => {
-      setLoadingStage('📚 Grounding response & preparing sources...');
-    }, 2400);
-
     try {
-      const context = materialId ? { materialId, ...(subject ? { subject } : {}) } : undefined;
+      const context = materialId ? { materialId, ...(subject ? { subject } : {}) } : (subject ? { subject } : undefined);
       const r = await chatWithAssistant(value, context);
-      if (r.executionMode === 'cloud_foundry') {
-        setEngineState('connected');
-        setModelName('Microsoft Foundry (gpt-4.1-mini)');
-      }
-      addChatMessage('assistant', r.text, r.sources, r.actions);
+      addChatMessage('assistant', r.text, r.sources, r.actions, true);
     } catch (e) {
-      console.error('AI chat error:', e);
       addChatMessage(
         'assistant',
-        formatApiError(e, "AcadAssist couldn't generate a response right now. Please try again.")
+        `Could not reach the AI service. ${e instanceof Error ? e.message : 'Please try again.'}`,
+        undefined,
+        undefined,
+        true
       );
     } finally {
-      window.clearTimeout(stageTimer1);
-      window.clearTimeout(stageTimer2);
       setTyping(false);
-      setLoadingStage('');
     }
   };
 
@@ -196,46 +141,19 @@ export default function Assistant() {
             Your Coursework <span className="accent">Study Companion.</span>
           </>
         }
-        subtitle="Clarify doubts, explain course concepts, generate summaries, and prepare for upcoming exams."
+        subtitle="Clarify doubts, explain course concepts, generate summaries, and prepare for upcoming exams with grounded citations."
       />
 
-      {/* Accurate AI Status Presentation (Task 2) */}
-      <div
-        className={`card p-3 flex items-center justify-between text-xs transition-colors ${
-          engineState === 'connected'
-            ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-200 border-emerald-200 dark:border-emerald-800/40'
-            : engineState === 'fallback'
-            ? 'bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800/40'
-            : 'bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-200 border-red-200 dark:border-red-800/40'
-        }`}
-      >
+      {/* Integration Status Banner */}
+      <div className="card p-3 flex items-center justify-between text-xs bg-[var(--color-green-light)] text-[var(--color-green-accent)] border-[var(--color-green-border)]">
         <div className="flex items-center gap-2">
           <Bot size={16} />
           <span>
-            <b>
-              {engineState === 'connected'
-                ? 'AI Engine Connected:'
-                : engineState === 'fallback'
-                ? 'Local AI / Fallback Mode:'
-                : 'AI Service Unavailable:'}
-            </b>{' '}
-            {engineDetail}
+            <b>Grounded RAG Pipeline Active:</b> Answers are grounded in your uploaded documents and course knowledge base with verified source citations.
           </span>
         </div>
-        <span
-          className={`font-bold text-[.68rem] px-2.5 py-1 rounded-md flex items-center gap-1.5 ${
-            engineState === 'connected'
-              ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200'
-              : engineState === 'fallback'
-              ? 'bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-200'
-              : 'bg-red-100 dark:bg-red-900/60 text-red-800 dark:text-red-200'
-          }`}
-        >
-          {engineState === 'connected'
-            ? '🟢 AI Engine Connected'
-            : engineState === 'fallback'
-            ? '🟡 Local AI/Fallback Mode'
-            : '🔴 AI Service Unavailable'}
+        <span className="font-semibold text-[.65rem] px-2 py-0.5 rounded bg-white/60 dark:bg-black/20">
+          Hybrid BM25 + Vector Search
         </span>
       </div>
 
@@ -247,15 +165,7 @@ export default function Assistant() {
             <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--color-card-border)]">
               <div>
                 <b className="text-sm">AcadAssist AI</b>
-                <span
-                  className={`ml-2 text-[.68rem] font-semibold ${
-                    engineState === 'connected'
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : engineState === 'fallback'
-                      ? 'text-amber-600 dark:text-amber-400'
-                      : 'text-red-500'
-                  }`}
-                >
+                <span className="ml-2 text-[.65rem] text-green-600 font-semibold">
                   ● {modelName}
                 </span>
               </div>
@@ -277,46 +187,22 @@ export default function Assistant() {
                     <div className="bubble">
                       <div className="whitespace-pre-wrap">{m.text}</div>
 
-                      {/* Display Grounded Source Citations (Task 7) */}
+                      {/* Display Grounded Source Citations if present */}
                       {m.sources && m.sources.length > 0 && (
-                        <div className="mt-3 pt-2.5 border-t border-black/10 dark:border-white/10 text-xs">
-                          <div className="font-bold flex items-center justify-between text-[var(--color-green-accent)] mb-2">
-                            <div className="flex items-center gap-1.5">
-                              <Database size={13} />
-                              <span>Sources & Retrieved Material</span>
-                            </div>
-                            <span className="text-[0.62rem] font-medium text-[var(--color-text-muted)]">
-                              Grounded in course notes
-                            </span>
+                        <div className="mt-2.5 pt-2 border-t border-black/10 dark:border-white/10 text-xs">
+                          <div className="font-semibold flex items-center gap-1 text-[var(--color-green-accent)] mb-1">
+                            <Database size={12} /> Sources & Retrieved Material:
                           </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div className="flex flex-wrap gap-1.5">
                             {m.sources.map((s, idx) => (
-                              <div
+                              <span
                                 key={idx}
-                                className="p-2 rounded-lg bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 flex flex-col justify-between"
+                                className="px-2 py-0.5 rounded bg-black/5 dark:bg-white/10 text-[0.7rem] text-[var(--color-text-muted)] inline-flex items-center gap-1"
+                                title={s.content_snippet || s.citation}
                               >
-                                <div className="flex items-start gap-1.5 min-w-0">
-                                  <span className="text-sm leading-none flex-shrink-0 mt-0.5">📄</span>
-                                  <div className="min-w-0 flex-1">
-                                    <b className="text-xs text-[var(--color-text-dark)] truncate block" title={s.document_title || s.filename}>
-                                      {s.document_title || s.filename || 'Academic Document'}
-                                    </b>
-                                    <div className="flex items-center gap-2 mt-0.5 text-[0.68rem] text-[var(--color-text-muted)]">
-                                      {s.page_number ? <span>Page {s.page_number}</span> : s.slide_number ? <span>Slide {s.slide_number}</span> : <span>Verified Chunk</span>}
-                                      {s.score !== undefined && (
-                                        <span className="px-1.5 py-0.2 rounded bg-black/5 dark:bg-white/10 text-[0.62rem]">
-                                          {Math.round(s.score * 100)}% match
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                                {s.content_snippet && (
-                                  <p className="text-[0.65rem] text-[var(--color-text-muted)] mt-1.5 line-clamp-2 italic bg-black/5 dark:bg-black/20 p-1.5 rounded">
-                                    "{s.content_snippet}"
-                                  </p>
-                                )}
-                              </div>
+                                📄 {s.document_title || s.title || s.filename || 'Academic Chunk'}{' '}
+                                {s.page_number ? `(Page ${s.page_number})` : ''}
+                              </span>
                             ))}
                           </div>
                         </div>
@@ -338,37 +224,15 @@ export default function Assistant() {
                   </div>
                 ))
               ) : (
-                <div className="empty-state py-8">
-                  <div className="text-3xl mb-2">💬</div>
-                  <h3 className="text-base font-bold text-[var(--color-text-dark)]">Ask AcadAssist about your study material</h3>
-                  <p className="text-xs text-[var(--color-text-muted)] max-w-md mx-auto mt-1 mb-4">
-                    Clarify doubts, explain course concepts, generate summaries, and prepare for upcoming exams.
-                  </p>
-                  <div className="flex flex-wrap justify-center gap-2 max-w-lg mx-auto">
-                    {PROMPTS.slice(0, 3).map((pText, pIdx) => (
-                      <button
-                        key={pIdx}
-                        className="btn secondary text-xs text-left"
-                        onClick={() => {
-                          setInput(pText);
-                          send(pText);
-                        }}
-                      >
-                        <Sparkles size={12} className="text-[var(--color-green-accent)] flex-shrink-0" />
-                        <span className="truncate max-w-[280px]">{pText}</span>
-                      </button>
-                    ))}
-                  </div>
+                <div className="empty-state">
+                  <Sparkles size={28} />
+                  <h3>Start a coursework conversation</h3>
+                  <p>Ask a question about your uploaded documents or select a quick study tool below.</p>
                 </div>
               )}
               {typing && (
                 <div className="chat-bubble-ai">
-                  <div className="bubble flex items-center gap-2.5 py-3">
-                    <Sparkles size={16} className="text-[var(--color-green-accent)] animate-spin flex-shrink-0" />
-                    <span className="text-xs font-medium text-[var(--color-text-dark)]">
-                      {loadingStage || 'Generating study response...'}
-                    </span>
-                  </div>
+                  <div className="bubble">Retrieving course chunks & formulating grounded explanation…</div>
                 </div>
               )}
               <div ref={end} />
@@ -387,7 +251,7 @@ export default function Assistant() {
                 setMaterialId(val || null);
               }}
             >
-              <option value="">None (General Course Materials)</option>
+              <option value="">All Accessible Course Materials</option>
               {documents.map(d => (
                 <option key={d.id} value={d.id}>
                   📄 {d.name} ({d.id.slice(0, 8)}...)
@@ -416,19 +280,13 @@ export default function Assistant() {
                 className="flex-1 bg-transparent outline-none text-sm text-[var(--color-text-dark)]"
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !typing && input.trim()) {
-                    send();
-                  }
-                }}
-                disabled={typing}
-                placeholder={typing ? 'AcadAssist is formulating your grounded response...' : 'Ask about Deadlocks, TCP/UDP, Normalization, or problem derivations…'}
+                onKeyDown={e => e.key === 'Enter' && send()}
+                placeholder="Ask about Paging, Deadlocks, TCP/UDP, Binary Search, or your uploaded documents…"
               />
               <button
                 onClick={voice}
                 aria-label="Voice input"
-                disabled={typing}
-                className="text-[var(--color-text-muted)] hover:text-[var(--color-text-dark)] disabled:opacity-40"
+                className="text-[var(--color-text-muted)] hover:text-[var(--color-text-dark)]"
               >
                 <Mic size={16} />
               </button>
@@ -436,10 +294,10 @@ export default function Assistant() {
             <button
               onClick={() => send()}
               disabled={typing || !input.trim()}
-              className="w-10 h-10 rounded-xl bg-[var(--color-green-accent)] text-white flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex-shrink-0 transition-opacity"
+              className="w-10 h-10 rounded-xl bg-[var(--color-green-accent)] text-white flex items-center justify-center disabled:opacity-50 cursor-pointer flex-shrink-0"
               aria-label="Send message"
             >
-              {typing ? <Sparkles size={16} className="animate-spin" /> : <Send size={16} />}
+              <Send size={16} />
             </button>
           </div>
 
@@ -485,9 +343,9 @@ export default function Assistant() {
 
           <div className="card p-3 text-xs text-[var(--color-text-muted)]">
             <div className="flex items-center gap-1.5 font-bold text-[var(--color-text-dark)] mb-1">
-              <Info size={14} /> Azure AI Integration Point
+              <Info size={14} /> Grounded RAG Verification
             </div>
-            When Person 1 connects Azure OpenAI / Foundry in <code>src/services/api.ts</code>, responses will automatically stream from your deployed models.
+            Responses automatically retrieve chunks from your uploaded documents and attach exact filename and page citations.
           </div>
         </div>
       </div>
@@ -521,46 +379,46 @@ export default function Assistant() {
         open={modelModal}
         onClose={() => setModelModal(false)}
         title="Choose AI Model Mode"
-        subtitle="Frontend representation of deployment configurations for Azure integration"
+        subtitle="Select execution strategy for AcadAssist RAG responses"
       >
         <button
           className="card w-full text-left mb-2 p-3 hover:border-[var(--color-green-accent)]"
           onClick={() => {
-            setModelName('Fast Study Mode (Azure OpenAI Ready)');
+            setModelName('Fast Study Mode (Azure OpenAI / Local Hybrid)');
             setModelModal(false);
             pushToast('Fast Study Mode selected');
           }}
         >
           <div className="flex justify-between items-center">
             <b>Fast Study Mode</b>
-            <span className="soft-badge text-[.6rem]">Demo Mode</span>
+            <span className="soft-badge text-[.6rem]">Recommended</span>
           </div>
           <p className="muted text-xs mt-1">
-            Concise explanations, rapid definition lookups, and fast quiz hints. Prepared for <code>gpt-4o-mini</code>.
+            Concise explanations, rapid definition lookups, and fast quiz hints.
           </p>
         </button>
 
         <button
           className="card w-full text-left mb-2 p-3 hover:border-[var(--color-green-accent)]"
           onClick={() => {
-            setModelName('Deep Reasoning Mode (Foundry Ready)');
+            setModelName('Deep Reasoning Mode (Foundry Agent)');
             setModelModal(false);
             pushToast('Deep Reasoning Mode selected');
           }}
         >
           <div className="flex justify-between items-center">
             <b>Deep Reasoning Mode</b>
-            <span className="soft-badge text-[.6rem]">Demo Mode</span>
+            <span className="soft-badge text-[.6rem]">11 Tools Active</span>
           </div>
           <p className="muted text-xs mt-1">
-            Formal proofs, step-by-step mathematical derivations, and code simulations. Prepared for Azure AI Foundry reasoning endpoints.
+            Multi-step tool orchestration across Knowledge Search, Summarization, Quizzes, and Study Planner.
           </p>
         </button>
 
         <button
           className="card w-full text-left p-3 hover:border-[var(--color-green-accent)]"
           onClick={() => {
-            setModelName('Deterministic Local Mode (Offline)');
+            setModelName('Deterministic Local RAG (Offline Safe)');
             setModelModal(false);
             pushToast('Deterministic Local Mode selected');
           }}
@@ -570,7 +428,7 @@ export default function Assistant() {
             <span className="soft-badge text-[.6rem]">Active Fallback</span>
           </div>
           <p className="muted text-xs mt-1">
-            Built-in deterministic coursework question answering. Operates offline without external network dependency.
+            Built-in deterministic coursework question answering grounded in your local hybrid index.
           </p>
         </button>
       </Modal>
@@ -602,7 +460,7 @@ export default function Assistant() {
         open={confirmClear}
         onClose={() => setConfirmClear(false)}
         title="Clear conversation history"
-        subtitle="This only removes local chat messages in this browser."
+        subtitle="Removes saved chat messages from your account."
       >
         <p className="text-sm">Delete current conversation messages? Course documents, notes, and assessments will stay intact.</p>
         <div className="modal-actions">

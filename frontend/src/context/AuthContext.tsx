@@ -8,6 +8,7 @@ interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<LocalAccount>;
   signOut: () => Promise<void>;
   signUp: (name: string, email: string, password: string) => Promise<LocalAccount>;
+  refreshAccount: () => Promise<LocalAccount | null>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -15,16 +16,27 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [account, setAccount] = useState<LocalAccount | null>(() => auth.getSession());
 
-  // Verify and refresh session on mount
-  useEffect(() => {
-    auth.getCurrentUser().then(user => {
-      if (user) {
-        setAccount(user);
-      } else if (!auth.getToken()) {
-        setAccount(null);
-      }
-    });
+  const refreshAccount = useCallback(async () => {
+    const user = await auth.getCurrentUser();
+    if (user) {
+      setAccount(user);
+      return user;
+    }
+    if (!auth.getToken()) {
+      setAccount(null);
+    }
+    return null;
   }, []);
+
+  // Verify and refresh session on mount and listen to auth changes
+  useEffect(() => {
+    refreshAccount();
+    const onAuthChange = () => {
+      setAccount(auth.getSession());
+    };
+    window.addEventListener('acadassist:auth-changed', onAuthChange);
+    return () => window.removeEventListener('acadassist:auth-changed', onAuthChange);
+  }, [refreshAccount]);
 
   const signIn = useCallback(async (email: string, password: string) => {
     const next = await auth.login(email, password);
@@ -38,16 +50,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signUp = useCallback(async (name: string, email: string, password: string) => {
-    return await auth.createAccount(name, email, password);
+    const created = await auth.createAccount(name, email, password);
+    setAccount(created);
+    return created;
   }, []);
 
   const value = useMemo(() => ({
     account,
-    isAuthenticated: !!account,
+    isAuthenticated: !!account && !!auth.getToken(),
     signIn,
     signOut,
     signUp,
-  }), [account, signIn, signOut, signUp]);
+    refreshAccount,
+  }), [account, signIn, signOut, signUp, refreshAccount]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

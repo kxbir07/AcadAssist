@@ -112,8 +112,35 @@ def create_study_plan(
         mastery_records = person3_consumer.get_user_topic_mastery(db=db, user_id=user_id)
         mastery_map = {m.topic_id: m for m in mastery_records}
 
-        # 4. Fetch all available topics
-        all_topics = person3_consumer.get_all_topics(db=db)
+        # 4. Fetch all available topics and include user mastery / exam topics if not in Topic table
+        all_topics = list(person3_consumer.get_all_topics(db=db))
+        known_topic_ids = {t.topic_id for t in all_topics}
+        for m in mastery_records:
+            if m.topic_id and m.topic_id not in known_topic_ids:
+                all_topics.append(
+                    Topic(
+                        topic_id=m.topic_id,
+                        subject_id=getattr(m, "subject_id", None) or "general",
+                        course_id=getattr(m, "course_id", None) or "general",
+                        name=getattr(m, "topic_name", None) or m.topic_id,
+                        estimated_minutes=45,
+                    )
+                )
+                known_topic_ids.add(m.topic_id)
+        if not all_topics and upcoming_exams:
+            for ex in upcoming_exams:
+                tid = f"exam-prep-{ex.subject_id or 'general'}"
+                if tid not in known_topic_ids:
+                    all_topics.append(
+                        Topic(
+                            topic_id=tid,
+                            subject_id=ex.subject_id or "general",
+                            course_id=ex.course_id or "general",
+                            name=ex.title or f"{ex.subject_id} Exam Preparation",
+                            estimated_minutes=45,
+                        )
+                    )
+                    known_topic_ids.add(tid)
 
         # 5. Build candidate study items with priority and deadline constraints
         candidates = []

@@ -2,33 +2,47 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, AreaChart, Area
+  PieChart, Pie, Cell
 } from 'recharts';
-import { Check, ArrowRight } from 'lucide-react';
+import { Check, ArrowRight, AlertTriangle } from 'lucide-react';
 import HeroHeader from '../components/ui/HeroHeader';
 import SectionHeader from '../components/ui/SectionHeader';
 import ProgressBar from '../components/ui/ProgressBar';
 import Modal from '../components/ui/Modal';
 import { useApp } from '../context/AppContext';
+import { calculateCourseProgress } from '../utils/courseProgress';
+
+interface TopicMasteryRow {
+  topic: string;
+  accuracy: number;
+  level: string;
+}
 
 export default function Progress() {
   const {
-    studyGoals, toggleGoal, user, subjects, courses, quizzes, events, settings,
-    performanceMetrics, quizAttempts
+    studyGoals, toggleGoal, user, subjects, courses, courseProgress, quizzes, events, settings,
+    performanceMetrics, quizAttempts, progressSummary
   } = useApp();
   const navigate = useNavigate();
   const [goals, setGoals] = useState(false);
 
-  const active = subjects.filter(s => courses.some(c => c.enrolled && c.name === s.name));
-  const overall = Math.round(active.reduce((a, s) => a + s.progress, 0) / (active.length || 1));
+  const active = courses.filter(c => c.enrolled).map(course => ({...course, summary: calculateCourseProgress(course, courseProgress[course.id]), displayColor: subjects.find(s => s.name === course.name)?.color || course.color}));
+  const overall = active.length ? Math.round(active.reduce((sum, item) => sum + item.summary.overallPct, 0) / active.length) : 0;
   const completedQuizzes = quizzes.filter(q => q.score !== undefined);
+  const courseQuizResults = active.flatMap(course => Object.values(courseProgress[course.id]?.quizResults || {}));
+  const courseQuizScores = courseQuizResults.map(result => result.percentage);
   const avgScore = performanceMetrics && performanceMetrics.totalQuestionsAttempted > 0
     ? Math.round(performanceMetrics.overallAccuracy)
+    : courseQuizScores.length
+    ? Math.round(courseQuizScores.reduce((a, score) => a + score, 0) / courseQuizScores.length)
     : completedQuizzes.length
     ? Math.round(completedQuizzes.reduce((a, q) => a + (q.score || 0), 0) / completedQuizzes.length)
     : 0;
   const completedEvents = events.filter(e => e.completed).length;
   const totalEvents = events.length;
+  const totalStudyHours = progressSummary?.studyTimeMinutes
+    ? Number((progressSummary.studyTimeMinutes / 60).toFixed(1))
+    : completedEvents;
 
   const weekly = useMemo(() => {
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -37,21 +51,36 @@ export default function Progress() {
       .filter(e => e.type === 'Study Session' && e.completed)
       .forEach(e => {
         const d = new Date(e.date + 'T12:00:00').getDay();
-        map[d].hours += 1;
+        if (!Number.isNaN(d) && map[d]) {
+          map[d].hours += 1;
+        }
       });
     return map;
   }, [events]);
 
-  const trend = useMemo(() => {
-    const base = Math.max(0, overall - 20);
-    return Array.from({ length: 5 }, (_, i) => ({
-      week: `W${i + 1}`,
-      progress: Math.min(overall, base + Math.round(((overall - base) * (i + 1)) / 5)),
-    }));
-  }, [overall]);
+  const trend = useMemo(() => active.map(course => ({ course: course.name.length > 22 ? `${course.name.slice(0,22)}…` : course.name, progress: course.summary.overallPct })), [active]);
+
+  const topicBreakdown = useMemo<TopicMasteryRow[]>(() => {
+    const mapSource =
+      (performanceMetrics?.topicMastery && Object.keys(performanceMetrics.topicMastery).length > 0
+        ? performanceMetrics.topicMastery
+        : progressSummary?.topicMastery) || {};
+    return Object.entries(mapSource).map(([topic, rawVal]) => {
+      const pct = rawVal <= 1 ? Math.round(rawVal * 100) : Math.round(rawVal);
+      const level = pct >= 80 ? 'strong' : pct >= 60 ? 'developing' : 'weak';
+      return { topic, accuracy: pct, level };
+    });
+  }, [performanceMetrics, progressSummary]);
+
+  const weakTopics = useMemo<string[]>(() => {
+    if (performanceMetrics?.weakTopics?.length) {
+      return performanceMetrics.weakTopics.map(w => w.topic);
+    }
+    return topicBreakdown.filter((t: TopicMasteryRow) => t.accuracy < 60).map((t: TopicMasteryRow) => t.topic);
+  }, [performanceMetrics, topicBreakdown]);
 
   const activity = [
-    { name: 'Practice Quizzes', value: quizAttempts.length || completedQuizzes.length },
+    { name: 'Practice Quizzes', value: quizAttempts.length || completedQuizzes.length + courseQuizResults.length },
     { name: 'Planner Sessions', value: completedEvents },
     { name: 'Goals Completed', value: studyGoals.filter(g => g.completed).length },
   ];
@@ -73,7 +102,7 @@ export default function Progress() {
         <Stat value={`${overall}%`} label="Overall progress" sublabel="Workspace Average" />
         <Stat value={String(active.length)} label="Active subjects" sublabel="Curriculum" />
         <Stat value={`${avgScore}%`} label="Quiz average" sublabel="Diagnostic Score" />
-        <Stat value={`${completedEvents}/${totalEvents}`} label="Planner events done" sublabel="Scheduled" />
+        <Stat value={`${totalStudyHours}h`} label="Study time" sublabel={`${completedEvents}/${totalEvents} blocks done`} />
         <Stat value={`${user.streakDays} days`} label="Day streak" sublabel="Study Activity" />
       </div>
 
@@ -87,11 +116,11 @@ export default function Progress() {
                   <div className="flex-1">
                     <div className="flex justify-between mb-1">
                       <span className="text-xs font-semibold">{s.name}</span>
-                      <span className="text-xs font-bold">{s.progress}%</span>
+                      <span className="text-xs font-bold">{s.summary.overallPct}%</span>
                     </div>
-                    <ProgressBar value={s.progress} color={s.color} />
+                    <ProgressBar value={s.summary.overallPct} color={s.displayColor} />
                     <small className="text-[.62rem] text-[var(--color-text-muted)]">
-                      {s.topicsCompleted}/{s.totalTopics} topics mastered
+                      {s.summary.completedLessons}/{s.summary.totalLessons} lessons mastered
                     </small>
                   </div>
                 </div>
@@ -102,33 +131,43 @@ export default function Progress() {
           </div>
 
           <SectionHeader icon="📈" title="Progress Trend" />
-          <div className="card p-5">
+          <div className="card p-5 mb-6">
             <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={trend}>
+              <BarChart data={trend}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--color-card-border)" />
-                <XAxis dataKey="week" stroke="var(--color-text-muted)" fontSize={11} />
+                <XAxis dataKey="course" stroke="var(--color-text-muted)" fontSize={10} interval={0} angle={-20} textAnchor="end" height={55} />
                 <YAxis domain={[0, 100]} unit="%" stroke="var(--color-text-muted)" fontSize={11} />
-                <Tooltip
-                  contentStyle={{
-                    background: 'var(--color-card-bg)',
-                    borderColor: 'var(--color-card-border)',
-                    color: 'var(--color-text-dark)',
-                    borderRadius: '8px',
-                    fontSize: '12px',
-                  }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="progress"
-                  stroke={settings.accentColor}
-                  fill={settings.accentColor}
-                  fillOpacity={0.25}
-                />
-              </AreaChart>
+                <Tooltip contentStyle={{background:'var(--color-card-bg)',borderColor:'var(--color-card-border)',color:'var(--color-text-dark)',borderRadius:'8px',fontSize:'12px'}} />
+                <Bar dataKey="progress" fill={settings.accentColor} radius={[4,4,0,0]} />
+              </BarChart>
             </ResponsiveContainer>
-            <small className="text-[.62rem] text-[var(--color-text-muted)] block mt-2 text-right">
-              * Progress trend based on sample cycle
-            </small>
+            <small className="text-[.62rem] text-[var(--color-text-muted)] block mt-2 text-right">* Current progress for each enrolled course</small>
+          </div>
+
+          <SectionHeader icon="🧠" title="Topic-Wise Mastery" />
+          <div className="card p-5">
+            {topicBreakdown.length ? (
+              <div className="space-y-3">
+                {topicBreakdown.slice(0, 8).map((t: TopicMasteryRow) => (
+                  <div key={t.topic}>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="font-semibold">{t.topic}</span>
+                      <span className="font-bold">
+                        {Math.round(t.accuracy)}% · <small className="uppercase">{t.level}</small>
+                      </span>
+                    </div>
+                    <ProgressBar
+                      value={Math.round(t.accuracy)}
+                      color={t.accuracy >= 75 ? '#16a34a' : t.accuracy >= 50 ? settings.accentColor : '#dc2626'}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-inline">
+                Complete a practice quiz in Assessment or Courses to populate topic-level mastery analytics.
+              </div>
+            )}
           </div>
         </div>
 
@@ -153,12 +192,12 @@ export default function Progress() {
               </BarChart>
             </ResponsiveContainer>
             <p className="muted text-xs mt-3">
-              Tracked study sessions and completed planner blocks. Azure Cosmos / Postgres analytics can later synchronize exact study timer logs.
+              Tracked study sessions and completed planner blocks synchronized with backend analytics.
             </p>
           </div>
 
           <SectionHeader icon="🎯" title="Activity Mix" />
-          <div className="card p-5 flex items-center gap-4">
+          <div className="card p-5 flex items-center gap-4 mb-6">
             <div className="w-36 h-36">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
@@ -178,6 +217,29 @@ export default function Progress() {
                 </div>
               ))}
             </div>
+          </div>
+
+          <SectionHeader icon="⚠️" title="Weak-Topic Detection" />
+          <div className="card p-5">
+            {weakTopics.length ? (
+              <div className="space-y-2">
+                {weakTopics.map((topic: string) => (
+                  <div key={topic} className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/25">
+                    <div className="flex items-center gap-2 text-xs font-semibold">
+                      <AlertTriangle size={14} className="text-amber-600" />
+                      <span>{topic}</span>
+                    </div>
+                    <button className="btn secondary text-xs" onClick={() => navigate('/assessment')}>
+                      Practice
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-inline">
+                No weak topics flagged below 60% mastery. Keep taking diagnostic quizzes to monitor your retention.
+              </div>
+            )}
           </div>
         </div>
 

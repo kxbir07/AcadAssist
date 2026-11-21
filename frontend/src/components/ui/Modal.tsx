@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { X } from 'lucide-react';
 
 interface ModalProps {
@@ -12,17 +12,6 @@ interface ModalProps {
 }
 
 export default function Modal({ open, onClose, title, subtitle, children, wide = false, footer }: ModalProps) {
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
-
   if (!open) return null;
   return (
     <div className="modal-backdrop" onClick={onClose} role="presentation">

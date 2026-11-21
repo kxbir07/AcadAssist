@@ -41,81 +41,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   });
-  if (!response.ok) {
-    const errText = (await response.text()) || `Request failed (${response.status})`;
-    throw new Error(errText);
-  }
+  if (!response.ok) throw new Error((await response.text()) || `Request failed (${response.status})`);
   return response.json() as Promise<T>;
-}
-
-export function formatApiError(
-  error: unknown,
-  fallbackMessage = 'Something went wrong while processing this request. Please try again.'
-): string {
-  if (!error) return fallbackMessage;
-  if (typeof error === 'string') {
-    if (error.includes('Failed to fetch') || error.includes('NetworkError') || error.includes('Network Error')) {
-      return 'Unable to connect to the server. Check your connection and try again.';
-    }
-    if (error.includes('500') || error.includes('Internal Server Error') || error.includes('Traceback')) {
-      return fallbackMessage;
-    }
-    return error;
-  }
-  if (error instanceof Error) {
-    const msg = error.message;
-    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('Network Error') || msg.includes('fetch failed')) {
-      return 'Unable to connect to the server. Check your connection and try again.';
-    }
-    try {
-      const parsed = JSON.parse(msg);
-      if (parsed.detail && typeof parsed.detail === 'string') {
-        if (!parsed.detail.includes('Traceback') && !parsed.detail.includes('OperationalError') && !parsed.detail.includes('AuthenticationError')) {
-          return parsed.detail;
-        }
-      }
-    } catch {
-      // not JSON
-    }
-    if (msg.includes('500') || msg.includes('Internal Server Error') || msg.includes('AuthenticationError') || msg.includes('OperationalError') || msg.includes('Traceback')) {
-      return fallbackMessage;
-    }
-    return msg;
-  }
-  return fallbackMessage;
-}
-
-export interface HealthStatus {
-  status: string;
-  service?: string;
-  environment?: string;
-  subsystems?: Record<string, string>;
-  foundry?: {
-    mode?: string;
-    configured?: boolean;
-  };
-  azure_storage?: {
-    mode?: string;
-    configured?: boolean;
-  };
-  azure_search?: {
-    mode?: string;
-    configured?: boolean;
-  };
-  embeddings?: {
-    mode?: string;
-    configured?: boolean;
-    model?: string;
-  };
-}
-
-export async function fetchHealthStatus(): Promise<HealthStatus | null> {
-  try {
-    return await request<HealthStatus>('/health');
-  } catch (err) {
-    console.warn('Health check request notice:', err);
-    return null;
-  }
 }
 
 export interface ChatResult {
@@ -126,7 +53,6 @@ export interface ChatResult {
     title?: string;
     filename?: string;
     page_number?: number;
-    slide_number?: number;
     score?: number;
     content_snippet?: string;
     citation?: string;
@@ -176,8 +102,6 @@ export interface DocumentUploadResponse {
   status?: string;
 }
 
-// Human-readable label for a backend document processing status. The backend
-// status values are 'uploaded' | 'queued' | 'processing' | 'processed' | 'failed'.
 export function displayDocumentStatus(status?: string): string {
   switch ((status || '').toLowerCase()) {
     case 'processed':
@@ -195,8 +119,6 @@ export function displayDocumentStatus(status?: string): string {
   }
 }
 
-// Whether a document's chunks are actually indexed and safe to use for
-// quiz generation, chat, or summaries. Only 'processed' documents qualify.
 export function isDocumentReady(status?: string): boolean {
   return (status || '').toLowerCase() === 'processed';
 }
@@ -266,27 +188,27 @@ export async function uploadDocument(
     throw new Error('Document upload succeeded without a document ID.');
   }
 
-  // Trigger the parsing/chunking/embedding/indexing pipeline and wait for its
-  // real outcome. This status (not an optimistic guess) is what the UI must
-  // show, so a document that fails or is still processing is never presented
-  // as ready for quiz generation.
-  let processedStatus = 'uploaded';
-  try {
-    const processUrl = API_BASE ? `${API_BASE}/api/documents/${encodeURIComponent(data.document_id)}/process` : `/api/documents/${encodeURIComponent(data.document_id)}/process`;
-    const processRes = await fetch(processUrl, {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (processRes.ok) {
-      const processData = await processRes.json();
-      processedStatus = processData.status || 'processed';
-    } else {
-      console.error('Document processing failed:', await processRes.text());
+  let processedStatus = data.status || 'uploaded';
+  if (processedStatus !== 'processed') {
+    try {
+      const processUrl = API_BASE
+        ? `${API_BASE}/api/documents/${encodeURIComponent(data.document_id)}/process`
+        : `/api/documents/${encodeURIComponent(data.document_id)}/process`;
+      const processRes = await fetch(processUrl, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (processRes.ok) {
+        const processData = await processRes.json();
+        processedStatus = processData.status || 'processed';
+      } else {
+        console.error('Document processing failed:', await processRes.text());
+        processedStatus = 'failed';
+      }
+    } catch (err) {
+      console.error('Failed to trigger document processing:', err);
       processedStatus = 'failed';
     }
-  } catch (err) {
-    console.error('Failed to trigger document processing:', err);
-    processedStatus = 'failed';
   }
 
   return {
@@ -294,26 +216,108 @@ export async function uploadDocument(
     name: data.filename || file.name,
     size: file.size,
     type: file.type || 'application/pdf',
-    uploadedAt: data.created_at || new Date().toISOString(),
+    uploadedAt: data.uploaded_at || data.created_at || new Date().toISOString(),
+    subjectId: data.subject_id || subjectId,
+    courseId: data.course_id || courseId,
     isDemo: false,
     status: processedStatus,
   };
 }
 
-export async function downloadDocument(documentId: string, filename: string): Promise<void> {
-  const url = API_BASE ? `${API_BASE}/api/documents/${encodeURIComponent(documentId)}/download` : `/api/documents/${encodeURIComponent(documentId)}/download`;
+export async function fetchDocumentBlob(documentId: string): Promise<Blob> {
+  const url = API_BASE
+    ? `${API_BASE}/api/documents/${encodeURIComponent(documentId)}/download`
+    : `/api/documents/${encodeURIComponent(documentId)}/download`;
   const token = localStorage.getItem('acadassist.auth.token');
   const res = await fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) throw new Error(`Download failed with status ${res.status}`);
-  const blob = await res.blob();
+  return await res.blob();
+}
+
+export async function downloadDocument(documentId: string, filename: string): Promise<void> {
+  const blob = await fetchDocumentBlob(documentId);
   const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = blobUrl;
   a.download = filename;
   a.click();
   setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
+
+export async function deleteBackendDocument(documentId: string): Promise<boolean> {
+  try {
+    await request(`/api/documents/${encodeURIComponent(documentId)}`, {
+      method: 'DELETE',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface DocumentSummaryResult {
+  document_id: string;
+  title: string;
+  filename: string;
+  mode: string;
+  status: string;
+  summary: string;
+  total_chunks: number;
+  sections: Array<{ section: string; page?: number; slide?: number; overview?: string }>;
+}
+
+export async function summarizeBackendDocument(
+  documentId: string,
+  mode: 'quick' | 'detailed' | 'exam' | 'revision' = 'quick'
+): Promise<DocumentSummaryResult | null> {
+  try {
+    return await request<DocumentSummaryResult>(
+      `/api/documents/${encodeURIComponent(documentId)}/summarize`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ mode }),
+      }
+    );
+  } catch {
+    return null;
+  }
+}
+
+export interface KnowledgeChunkSearchResult {
+  chunk_id: string;
+  document_id: string;
+  course_id: string;
+  subject_id: string;
+  content: string;
+  document_title: string;
+  section_title?: string | null;
+  filename: string;
+  page_number?: number | null;
+  slide_number?: number | null;
+  score: number;
+}
+
+export async function searchKnowledgeChunks(
+  query: string,
+  options?: { courseId?: string; subjectId?: string; topK?: number }
+): Promise<KnowledgeChunkSearchResult[]> {
+  if (!query.trim()) return [];
+  try {
+    const res = await request<{ results: KnowledgeChunkSearchResult[] }>('/api/knowledge/search', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: query.trim(),
+        course_id: options?.courseId,
+        subject_id: options?.subjectId,
+        top_k: options?.topK || 6,
+      }),
+    });
+    return res.results || [];
+  } catch {
+    return [];
+  }
 }
 
 // Person 3 / Person 4: Weak Topics (/api/performance/weak-topics)
@@ -377,6 +381,51 @@ export async function fetchStudyRecommendations(): Promise<StudyRecommendation[]
   return [];
 }
 
+export interface ProgressMetricsSummary {
+  courseCompletion: number;
+  subjectCompletion: number;
+  topicMastery: Record<string, number>;
+  quizAccuracy: number;
+  studyConsistency: number;
+  plannerCompletion: number;
+  studyTimeMinutes: number;
+  completedTopics: string[];
+  remainingTopics: string[];
+}
+
+export async function fetchProgressSummary(courseId?: string, subjectId?: string): Promise<ProgressMetricsSummary | null> {
+  try {
+    const params = new URLSearchParams();
+    if (courseId) params.set('course_id', courseId);
+    if (subjectId) params.set('subject_id', subjectId);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const res = await request<{
+      course_completion: number;
+      subject_completion: number;
+      topic_mastery: Record<string, number>;
+      quiz_accuracy: number;
+      study_consistency: number;
+      planner_completion: number;
+      study_time: number;
+      completed_topics: string[];
+      remaining_topics: string[];
+    }>(`/api/progress${qs}`);
+    return {
+      courseCompletion: res.course_completion,
+      subjectCompletion: res.subject_completion,
+      topicMastery: res.topic_mastery || {},
+      quizAccuracy: res.quiz_accuracy,
+      studyConsistency: res.study_consistency,
+      plannerCompletion: res.planner_completion,
+      studyTimeMinutes: res.study_time || 0,
+      completedTopics: res.completed_topics || [],
+      remainingTopics: res.remaining_topics || [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface PerformanceMetrics {
   userId: string;
   overallAccuracy: number;
@@ -386,6 +435,8 @@ export interface PerformanceMetrics {
   totalCorrect: number;
   totalIncorrect: number;
   topicMastery: Record<string, number>;
+  topicAccuracy?: Record<string, number>;
+  difficultyAccuracy?: Record<string, number>;
   weakTopics: Array<{ topicId: string; topic: string; mastery: number }>;
   strongTopics: Array<{ topicId: string; topic: string; mastery: number }>;
 }
@@ -401,6 +452,8 @@ export async function fetchPerformanceMetrics(): Promise<PerformanceMetrics | nu
       total_correct: number;
       total_incorrect: number;
       topic_mastery: Record<string, number>;
+      topic_accuracy?: Record<string, number>;
+      difficulty_accuracy?: Record<string, number>;
       weak_topics: Array<{ topic_id: string; topic: string; mastery: number }>;
       strong_topics: Array<{ topic_id: string; topic: string; mastery: number }>;
     }>('/api/performance');
@@ -414,6 +467,8 @@ export async function fetchPerformanceMetrics(): Promise<PerformanceMetrics | nu
         totalCorrect: res.total_correct,
         totalIncorrect: res.total_incorrect,
         topicMastery: res.topic_mastery || {},
+        topicAccuracy: res.topic_accuracy || {},
+        difficultyAccuracy: res.difficulty_accuracy || {},
         weakTopics: (res.weak_topics || []).map(w => ({ topicId: w.topic_id, topic: w.topic, mastery: w.mastery })),
         strongTopics: (res.strong_topics || []).map(s => ({ topicId: s.topic_id, topic: s.topic, mastery: s.mastery })),
       };
@@ -460,6 +515,45 @@ export async function fetchUpcomingExams(): Promise<BackendUpcomingExam[]> {
     // empty state
   }
   return [];
+}
+
+export async function scheduleBackendExam(payload: {
+  subjectId: string;
+  title: string;
+  examDate: string;
+  courseId?: string;
+}): Promise<BackendUpcomingExam | null> {
+  try {
+    const isoDate = payload.examDate.includes('T') ? payload.examDate : `${payload.examDate}T09:00:00`;
+    const res = await request<{
+      exam_id: string;
+      user_id: string;
+      subject_id: string;
+      title: string;
+      exam_date: string;
+      days_until_exam?: number;
+      assessment_focus?: string;
+    }>('/api/exams', {
+      method: 'POST',
+      body: JSON.stringify({
+        subject_id: payload.subjectId,
+        course_id: payload.courseId,
+        title: payload.title,
+        exam_date: isoDate,
+      }),
+    });
+    return {
+      examId: res.exam_id,
+      userId: res.user_id,
+      subjectId: res.subject_id,
+      title: res.title,
+      examDate: res.exam_date,
+      daysUntilExam: res.days_until_exam,
+      assessmentFocus: res.assessment_focus,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface QuizAttemptRecord {
@@ -522,6 +616,8 @@ export interface GeneratedQuestion {
   options: string[];
   answer: number;
   explanation: string;
+  topic?: string;
+  difficulty?: string;
 }
 
 export interface GeneratedQuizResponse {
@@ -537,6 +633,8 @@ export async function generateQuiz(req: QuizGenerationRequest): Promise<Generate
   const subjectId = req.subjectId || req.subject?.toLowerCase().replace(/\s+/g, '_') || 'operating_systems';
   const topicId = req.topic || 'General';
   const count = req.count || req.questionCount || 5;
+  const diffLower = req.difficulty ? req.difficulty.toLowerCase() : 'medium';
+  const backendDiff = ['easy', 'medium', 'hard'].includes(diffLower) ? diffLower : undefined;
 
   let res: {
     quiz_id?: string;
@@ -546,6 +644,8 @@ export async function generateQuiz(req: QuizGenerationRequest): Promise<Generate
     questions?: Array<{
       question_id: string;
       question_text: string;
+      topic_id?: string;
+      difficulty?: string;
       options: string[];
       explanation?: string;
       correct_answer?: string;
@@ -561,7 +661,7 @@ export async function generateQuiz(req: QuizGenerationRequest): Promise<Generate
         course_id: req.courseId,
         document_id: req.documentId,
         topic_ids: req.topic ? [req.topic] : [topicId],
-        difficulty: req.difficulty ? req.difficulty.toLowerCase() : 'medium',
+        difficulty: backendDiff,
         count: count,
         source_type: req.sourceType,
         title: req.topic ? `${req.topic} — ${req.isExam ? 'Timed Assessment' : 'Practice Quiz'}` : undefined,
@@ -593,25 +693,36 @@ export async function generateQuiz(req: QuizGenerationRequest): Promise<Generate
     title: res.title || `${req.topic || 'Practice'} — Practice Quiz`,
     source: req.topic || 'Document Material',
     subject: req.subject || req.subjectId || 'Computer Science',
-    questions: res.questions.map(q => ({
-      id: q.question_id,
-      text: q.question_text,
-      options: q.options || [],
-      // For exam integrity, correct answer index is not revealed until student submits
-      answer: -1,
-      explanation: '',
-    })),
+    questions: res.questions.map(q => {
+      let answerIndex = 0;
+      if (q.correct_answer && Array.isArray(q.options)) {
+        const caClean = q.correct_answer.trim().toLowerCase();
+        const foundIdx = q.options.findIndex(opt => {
+          const optClean = opt.trim().toLowerCase();
+          return (
+            optClean === caClean ||
+            (caClean.length >= 2 && optClean.startsWith(caClean.slice(0, 2))) ||
+            (optClean.length >= 2 && caClean.startsWith(optClean.slice(0, 2))) ||
+            (caClean.length > 3 && optClean.includes(caClean)) ||
+            (optClean.length > 3 && caClean.includes(optClean))
+          );
+        });
+        if (foundIdx !== -1) {
+          answerIndex = foundIdx;
+        }
+      }
+      return {
+        id: q.question_id,
+        text: q.question_text,
+        options: q.options || [],
+        answer: answerIndex,
+        explanation: q.explanation || '',
+        topic: q.topic_id || req.topic || 'General',
+        difficulty: q.difficulty || 'medium',
+      };
+    }),
     isDemo: false,
   };
-}
-
-export interface QuestionAttemptResult {
-  questionId: string;
-  selectedAnswer: string;
-  correctAnswer: string;
-  isCorrect: boolean;
-  explanation?: string;
-  timeTaken: number;
 }
 
 export interface QuizSubmissionResult {
@@ -621,7 +732,7 @@ export interface QuizSubmissionResult {
   total: number;
   percentage: number;
   weakTopics: Array<{ topicId: string; topic: string; mastery: number }>;
-  questionResults?: QuestionAttemptResult[];
+  strongTopics?: Array<{ topicId: string; topic: string; mastery: number }>;
   isDemo?: boolean;
 }
 
@@ -636,14 +747,7 @@ export async function submitQuiz(
     total: number;
     percentage: number;
     weak_topics: Array<{ topic_id: string; topic: string; mastery: number }>;
-    question_results?: Array<{
-      question_id: string;
-      selected_answer: string;
-      correct_answer: string;
-      is_correct: boolean;
-      explanation?: string;
-      time_taken: number;
-    }>;
+    strong_topics?: Array<{ topic_id: string; topic: string; mastery: number }>;
   }>(`/api/quizzes/${encodeURIComponent(quizId)}/submit`, {
     method: 'POST',
     body: JSON.stringify({
@@ -666,13 +770,10 @@ export async function submitQuiz(
       topic: w.topic,
       mastery: w.mastery,
     })),
-    questionResults: (res.question_results || []).map(r => ({
-      questionId: r.question_id,
-      selectedAnswer: r.selected_answer,
-      correctAnswer: r.correct_answer,
-      isCorrect: r.is_correct,
-      explanation: r.explanation,
-      timeTaken: r.time_taken,
+    strongTopics: (res.strong_topics || []).map(s => ({
+      topicId: s.topic_id,
+      topic: s.topic,
+      mastery: s.mastery,
     })),
     isDemo: false,
   };
@@ -726,11 +827,16 @@ export async function createStudyPlan(payload: {
   startDate: string;
   endDate: string;
   availableMinutesPerDay?: number;
+  userId?: string;
 }): Promise<any | null> {
   try {
+    const cachedUser = localStorage.getItem('acadassist.auth.user');
+    const parsedUser = cachedUser ? JSON.parse(cachedUser) : null;
+    const uid = payload.userId || parsedUser?.id || 'student';
     return await request('/api/plans', {
       method: 'POST',
       body: JSON.stringify({
+        user_id: uid,
         start_date: payload.startDate,
         end_date: payload.endDate,
         available_minutes_per_day: payload.availableMinutesPerDay || 120,
@@ -743,14 +849,20 @@ export async function createStudyPlan(payload: {
 
 export async function updateTaskStatus(
   taskId: string,
-  status: 'pending' | 'in_progress' | 'completed' | 'skipped'
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped',
+  rescheduledDate?: string,
+  rescheduledTime?: string
 ): Promise<BackendStudyTask | null> {
   try {
     return await request<BackendStudyTask>(
       `/api/tasks/${encodeURIComponent(taskId)}`,
       {
         method: 'PATCH',
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({
+          status,
+          rescheduled_date: rescheduledDate,
+          rescheduled_time: rescheduledTime,
+        }),
       }
     );
   } catch {

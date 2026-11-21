@@ -4,11 +4,12 @@ import HeroHeader from '../components/ui/HeroHeader';
 import SectionHeader from '../components/ui/SectionHeader';
 import Modal from '../components/ui/Modal';
 import { useApp } from '../context/AppContext';
+import { changePassword } from '../services/auth';
 
 export default function Settings() {
   const {
     settings, updateSetting, subjects, addSubject, updateSubject, deleteSubject,
-    pushToast, chatHistory, notes, user, updateUser
+    pushToast, chatHistory, clearChatHistory, notes, user, updateUser
   } = useApp();
   const [modal, setModal] = useState<string | null>(null);
   const [editing, setEditing] = useState<typeof subjects[number] | null>(null);
@@ -19,6 +20,13 @@ export default function Settings() {
   const [importance, setImportance] = useState<'Low' | 'Medium' | 'High'>('Medium');
   const [bio, setBio] = useState(user.bio);
   const [displayName, setDisplayName] = useState(user.fullName);
+
+  // Change password modal state
+  const [currentPw, setCurrentPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [pwError, setPwError] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
 
   const openSubject = (s?: typeof subjects[number]) => {
     setEditing(s || null);
@@ -60,6 +68,35 @@ export default function Settings() {
       pushToast('Subject added');
     }
     setModal(null);
+  };
+
+  const handlePasswordChange = async () => {
+    setPwError('');
+    if (!currentPw) {
+      setPwError('Enter your current password.');
+      return;
+    }
+    if (newPw.length < 8) {
+      setPwError('New password must be at least 8 characters long.');
+      return;
+    }
+    if (newPw !== confirmPw) {
+      setPwError('New passwords do not match.');
+      return;
+    }
+    setPwBusy(true);
+    try {
+      const msg = await changePassword(currentPw, newPw);
+      setCurrentPw('');
+      setNewPw('');
+      setConfirmPw('');
+      setModal(null);
+      pushToast(msg, 'success');
+    } catch (err) {
+      setPwError(err instanceof Error ? err.message : 'Unable to change password.');
+    } finally {
+      setPwBusy(false);
+    }
   };
 
   const exportData = () => {
@@ -265,7 +302,10 @@ export default function Settings() {
               <button
                 key={key}
                 className="w-full flex justify-between py-3 px-3 text-left border-b last:border-0 border-[var(--color-border-light)] text-xs"
-                onClick={() => setModal(key)}
+                onClick={() => {
+                  setPwError('');
+                  setModal(key);
+                }}
               >
                 <span>{label}</span>
                 <span>›</span>
@@ -290,7 +330,7 @@ export default function Settings() {
               className="w-full flex justify-between py-3 px-3 text-left border-t border-[var(--color-border-light)] text-xs"
               onClick={() => setModal('clear')}
             >
-              <span>Clear local AI conversation history</span>
+              <span>Clear AI conversation history</span>
               <Trash2 size={14} />
             </button>
           </div>
@@ -339,36 +379,77 @@ export default function Settings() {
       </Modal>
 
       <Modal
-        open={modal === 'password' || modal === '2fa' || modal === 'sessions'}
+        open={modal === 'password'}
+        onClose={() => !pwBusy && setModal(null)}
+        title="Change Password"
+        subtitle="Update your account password securely with bcrypt hashing."
+      >
+        {pwError && (
+          <div className="auth-error mb-3" role="alert">
+            {pwError}
+          </div>
+        )}
+        <label>
+          Current password
+          <input
+            className="input"
+            type="password"
+            value={currentPw}
+            onChange={e => setCurrentPw(e.target.value)}
+            placeholder="Enter current password"
+          />
+        </label>
+        <label>
+          New password (min 8 characters)
+          <input
+            className="input"
+            type="password"
+            value={newPw}
+            onChange={e => setNewPw(e.target.value)}
+            placeholder="Enter new password"
+          />
+        </label>
+        <label>
+          Confirm new password
+          <input
+            className="input"
+            type="password"
+            value={confirmPw}
+            onChange={e => setConfirmPw(e.target.value)}
+            placeholder="Repeat new password"
+          />
+        </label>
+        <div className="modal-actions">
+          <button className="btn secondary" onClick={() => setModal(null)} disabled={pwBusy}>
+            Cancel
+          </button>
+          <button className="btn primary" onClick={handlePasswordChange} disabled={pwBusy}>
+            <Lock size={14} /> {pwBusy ? 'Updating…' : 'Update password'}
+          </button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={modal === '2fa' || modal === 'sessions'}
         onClose={() => setModal(null)}
-        title={
-          modal === 'password'
-            ? 'Change Password'
-            : modal === '2fa'
-            ? 'Two-Factor Authentication'
-            : 'Manage Sessions'
-        }
+        title={modal === '2fa' ? 'Two-Factor Authentication' : 'Active Sessions'}
       >
         <p className="text-sm">
-          Authentication and security settings will connect to your production identity provider (e.g. Azure Entra ID / Supabase). The frontend is integration-ready and does not simulate credentials locally.
+          {modal === 'sessions'
+            ? `Signed in as ${user.email || user.fullName}. Your active session is protected by a signed Bearer JWT token.`
+            : 'Two-factor authentication is managed via Microsoft Entra ID in cloud deployments.'}
         </p>
         <div className="modal-actions">
-          <button
-            className="btn primary"
-            onClick={() => {
-              setModal(null);
-              pushToast('Backend identity provider required for auth management', 'info');
-            }}
-          >
-            {modal === '2fa' ? <Shield size={14} /> : modal === 'password' ? <Lock size={14} /> : <UserRound size={14} />}
-            Understood
+          <button className="btn primary" onClick={() => setModal(null)}>
+            {modal === '2fa' ? <Shield size={14} /> : <UserRound size={14} />}
+            Close
           </button>
         </div>
       </Modal>
 
       <Modal open={modal === 'clear'} onClose={() => setModal(null)} title="Clear AI conversation">
         <p className="text-sm">
-          This will clear the locally saved conversation messages with AcadAssist AI. Your uploaded documents and notes will remain intact.
+          This will clear your saved conversation messages with AcadAssist AI. Your uploaded documents and notes will remain intact.
         </p>
         <div className="modal-actions">
           <button className="btn secondary" onClick={() => setModal(null)}>
@@ -377,8 +458,9 @@ export default function Settings() {
           <button
             className="btn danger"
             onClick={() => {
-              localStorage.removeItem('acadassist.chat');
-              window.location.reload();
+              clearChatHistory();
+              setModal(null);
+              pushToast('AI conversation history cleared', 'info');
             }}
           >
             Clear conversation
@@ -388,7 +470,7 @@ export default function Settings() {
 
       <Modal open={modal === 'delete'} onClose={() => setModal(null)} title="Delete account">
         <p className="text-sm">
-          Account deletion requires verification by your connected backend. No mock deletion is performed locally.
+          For data safety and academic record preservation, account deletion is protected and requires administrator confirmation.
         </p>
         <div className="modal-actions">
           <button className="btn secondary" onClick={() => setModal(null)}>
@@ -398,7 +480,7 @@ export default function Settings() {
             className="btn danger"
             onClick={() => {
               setModal(null);
-              pushToast('Account deletion API required', 'error');
+              pushToast('Account records are protected from accidental deletion', 'info');
             }}
           >
             Understood

@@ -1,0 +1,26 @@
+{
+  "courses": 1810,
+  "modules": 31413,
+  "lessons": 31413,
+  "moduleQuizzes": 31413,
+  "finalQuizzes": 1810,
+  "moduleQuizQuestionsPerModule": 12,
+  "finalQuizQuestionsPerCourse": 30,
+  "sourceLessonWordCount": {
+    "min": 44,
+    "median": 106,
+    "max": 113
+  },
+  "courseDataLocal": true,
+  "progressLocal": true,
+  "documentQuizSystemSeparate": true,
+  "courseDataValidation": "PASS",
+  "typescriptBuild": "NOT_VERIFIED",
+  "browserRegression": "NOT_VERIFIED",
+  "notes": [
+    "Stored lesson records are compact local curriculum blueprints; LessonPage expands them into structured long-form study material locally from the course/module/coverage metadata.",
+    "One canonical acadassist.courseProgress state now stores lesson completion, quiz completion, quiz results, last lesson and last activity.",
+    "Dashboard, Courses, CourseDetail, Progress and Subjects synchronization use the shared courseProgress calculation helper.",
+    "Legacy acadassist.courseQuizResults is migrated into the canonical courseProgress record on first load."
+  ]
+}

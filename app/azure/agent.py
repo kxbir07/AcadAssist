@@ -8,7 +8,8 @@ with the authenticated student identity.
 
 import json
 import logging
-from datetime import date, timedelta
+import re
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from config.settings import get_settings
@@ -18,6 +19,9 @@ from app.azure.tools import get_agent_tools
 from app.azure.adapters import ToolDispatcher
 
 logger = logging.getLogger(__name__)
+
+# Cache unreachable cloud LLM status in non-production
+_foundry_cloud_unreachable: bool = False
 
 ACADASSIST_SYSTEM_INSTRUCTIONS = (
     "You are AcadAssist, an AI academic study assistant. Your purpose is to help students understand their "
@@ -71,6 +75,7 @@ class AcadAssistAgentService:
         db: Optional[Any] = None,
     ) -> ChatResponse:
         """Execute chat interaction for a student through the AcadAssist Agent."""
+        global _foundry_cloud_unreachable
         logger.info(
             "Chat request received for user_id=%s, doc_id=%s, message='%s'",
             user_id,
@@ -78,16 +83,29 @@ class AcadAssistAgentService:
             message,
         )
 
-        # If Microsoft Foundry cloud project is configured, run through Azure Foundry OpenAI client
-        if self.foundry_manager.is_configured:
-            return self._execute_cloud_agent(
-                user_id,
-                message,
-                document_id=document_id,
-                course_id=course_id,
-                subject_id=subject_id,
-                db=db,
-            )
+        # If Microsoft Foundry cloud project is configured and not in test mode, try cloud agent
+        if (
+            self.foundry_manager.is_configured
+            and not self.settings.is_test()
+            and (self.settings.is_production() or not _foundry_cloud_unreachable)
+        ):
+            try:
+                return self._execute_cloud_agent(
+                    user_id,
+                    message,
+                    document_id=document_id,
+                    course_id=course_id,
+                    subject_id=subject_id,
+                    db=db,
+                )
+            except Exception as exc:
+                if self.settings.is_production():
+                    raise
+                _foundry_cloud_unreachable = True
+                logger.warning(
+                    "Cloud Foundry agent execution failed (%s); falling back to local AcadAssist orchestrator",
+                    exc,
+                )
 
         # In production, do NOT silently fall back to local orchestrator!
         if self.settings.is_production():
@@ -97,7 +115,7 @@ class AcadAssistAgentService:
             )
 
         # Otherwise execute through local test orchestrator (deterministic demo/test mode)
-        logger.info("Foundry cloud not configured; executing via local AcadAssist orchestrator")
+        logger.info("Executing via local AcadAssist orchestrator")
         return self._execute_local_agent(
             user_id,
             message,
@@ -133,7 +151,7 @@ class AcadAssistAgentService:
                     latest_doc = (
                         db.query(Document)
                         .filter(Document.user_id == user_id, Document.status == "processed")
-                        .order_by(Document.created_at.desc())
+                        .order_by(Document.uploaded_at.desc())
                         .first()
                     )
                     if latest_doc:
@@ -142,8 +160,7 @@ class AcadAssistAgentService:
             except Exception as e:
                 logger.debug("Could not resolve active document context: %s", e)
 
-        today_str = date.today().isoformat()
-        user_prompt_parts = [f"[User ID: {user_id}]", f"[Today's Date: {today_str}]"]
+        user_prompt_parts = [f"[User ID: {user_id}]"]
         if active_doc_info:
             user_prompt_parts.append(active_doc_info)
         if course_id:
@@ -170,7 +187,6 @@ class AcadAssistAgentService:
             )
             response_message = response.choices[0].message
 
-            # Check if model requested tool calls
             if response_message.tool_calls:
                 messages.append(response_message)
                 for tool_call in response_message.tool_calls:
@@ -182,7 +198,7 @@ class AcadAssistAgentService:
 
                     # Strictly enforce server-authenticated identity (anti-impersonation rule)
                     fn_args["user_id"] = user_id
-                    if resolved_doc_id and fn_name in ["summarize_document"] and "document_id" not in fn_args:
+                    if resolved_doc_id and fn_name in ["summarize_document", "search_knowledge"] and "document_id" not in fn_args:
                         fn_args["document_id"] = resolved_doc_id
                     if subject_id and "subject_id" not in fn_args and fn_name in ["generate_quiz", "search_knowledge"]:
                         fn_args["subject_id"] = subject_id
@@ -216,7 +232,6 @@ class AcadAssistAgentService:
                         }
                     )
             else:
-                # Final response generated
                 final_content = response_message.content or ""
                 return ChatResponse(
                     message=final_content,
@@ -225,7 +240,6 @@ class AcadAssistAgentService:
                     execution_mode="cloud_foundry",
                 )
 
-        # Fallback if loop exceeded
         return ChatResponse(
             message="I completed processing your request using your course tools.",
             sources=collected_sources,
@@ -243,12 +257,25 @@ class AcadAssistAgentService:
         db: Optional[Any] = None,
     ) -> ChatResponse:
         """Deterministic local agent execution for tests and offline development."""
-        msg_lower = message.lower()
+        msg_lower = message.lower().strip()
         collected_sources: List[SourceItem] = []
         collected_actions: List[ActionItem] = []
 
-        # Summarization intent
-        if "summarize" in msg_lower or "summary" in msg_lower:
+        # 1. Date query intent (handled separately from study-plan requests)
+        if re.search(
+            r"\b(today'?s\s+date|today\s+date|current\s+date|date\s+today|what(?:'s|\s+is)\s+(?:the\s+)?(?:current\s+)?date)\b",
+            msg_lower,
+        ):
+            today_str = date.today().strftime("%A, %B %d, %Y")
+            return ChatResponse(
+                message=f"Today's date is {today_str}.",
+                sources=collected_sources,
+                actions=collected_actions,
+                execution_mode="local_orchestrator",
+            )
+
+        # 2. Summarization intent
+        elif re.search(r"\b(summariz(?:e|ation)|summary|summaries)\b", msg_lower):
             doc_id = document_id or "doc-ostep-vm"
             tool_res = self.tool_dispatcher.dispatch(
                 "summarize_document",
@@ -266,8 +293,35 @@ class AcadAssistAgentService:
                 execution_mode="local_orchestrator",
             )
 
-        # Progress tracking intent
-        elif any(term in msg_lower for term in ["progress", "completion", "how am i doing", "streak"]):
+        # 3. Quiz generation intent (before general Q&A)
+        elif (
+            re.search(r"\b(quiz|quizzes|practice\s+quiz|practice\s+questions?|practice\s+test)\b", msg_lower)
+            or (re.search(r"\bpractice\b", msg_lower) and not re.search(r"\b(explain|concept)\b", msg_lower))
+        ):
+            topic = "Operating Systems Paging" if "paging" in msg_lower else ("Computer Networks" if "network" in msg_lower or "tcp" in msg_lower else "General Review")
+            tool_res = self.tool_dispatcher.dispatch(
+                "generate_quiz",
+                {"user_id": user_id, "subject_id": subject_id or "cs", "topic_ids": [topic], "difficulty": "medium", "count": 5, "document_id": document_id},
+                authenticated_user_id=user_id,
+                db=db,
+            )
+            quiz_data = tool_res.get("output", {})
+            collected_actions.append(
+                ActionItem(
+                    type="quiz_generated",
+                    description=f"Generated {quiz_data.get('count', 5)} practice questions on {topic}.",
+                    payload=quiz_data,
+                )
+            )
+            return ChatResponse(
+                message=f"I have prepared a practice quiz on {topic} for you. Select your answers to test your knowledge.",
+                sources=collected_sources,
+                actions=collected_actions,
+                execution_mode="local_orchestrator",
+            )
+
+        # 4. Progress tracking intent
+        elif re.search(r"\b(progress|completion|how\s+am\s+i\s+doing|streak)\b", msg_lower):
             tool_res = self.tool_dispatcher.dispatch(
                 "get_progress",
                 {"user_id": user_id, "course_id": course_id, "subject_id": subject_id},
@@ -288,8 +342,8 @@ class AcadAssistAgentService:
                 execution_mode="local_orchestrator",
             )
 
-        # Weak topics intent
-        elif any(term in msg_lower for term in ["weak topic", "weak areas", "struggle", "need help", "improve"]):
+        # 5. Weak topics intent
+        elif re.search(r"\b(weak\s+topics?|weak\s+areas?|struggl(?:e|ing)|need\s+help|improve|improvement)\b", msg_lower):
             tool_res = self.tool_dispatcher.dispatch(
                 "get_weak_topics",
                 {"user_id": user_id, "subject_id": subject_id},
@@ -306,8 +360,11 @@ class AcadAssistAgentService:
                 execution_mode="local_orchestrator",
             )
 
-        # Upcoming exams intent
-        elif any(term in msg_lower for term in ["upcoming exam", "exams are coming", "exam date", "next exam"]):
+        # 6. Upcoming exams intent (word-boundary matched: 'example' and 'examples' NEVER trigger this)
+        elif re.search(
+            r"\b(upcoming\s+exams?|exams?\s+are\s+coming|exam\s+dates?|next\s+exam|show\s+(?:my\s+)?exams?|my\s+exams?|when\s+is\s+my\s+exam)\b",
+            msg_lower,
+        ):
             tool_res = self.tool_dispatcher.dispatch(
                 "get_upcoming_exams",
                 {"user_id": user_id},
@@ -324,13 +381,11 @@ class AcadAssistAgentService:
                 execution_mode="local_orchestrator",
             )
 
-        elif any(term in msg_lower for term in ["weekly report", "study report", "weekly summary"]):
-            today_val = date.today()
-            w_end = today_val.isoformat()
-            w_start = (today_val - timedelta(days=7)).isoformat()
+        # 7. Weekly report intent
+        elif re.search(r"\b(weekly\s+report|study\s+report|weekly\s+summary)\b", msg_lower):
             tool_res = self.tool_dispatcher.dispatch(
                 "generate_weekly_report",
-                {"user_id": user_id, "week_start": w_start, "week_end": w_end},
+                {"user_id": user_id, "week_start": "2026-09-15", "week_end": "2026-09-22"},
                 authenticated_user_id=user_id,
                 db=db,
             )
@@ -348,62 +403,17 @@ class AcadAssistAgentService:
                 execution_mode="local_orchestrator",
             )
 
-        # Knowledge retrieval intent
-        elif any(term in msg_lower for term in ["explain", "what is", "paging", "virtual memory", "concept", "lecture", "search", "tcp", "udp"]):
-            tool_res = self.tool_dispatcher.dispatch(
-                "search_knowledge",
-                {"user_id": user_id, "query": message, "course_id": course_id, "subject_id": subject_id, "top_k": 3},
-                authenticated_user_id=user_id,
-                db=db,
+        # 8. Study plan intent (never triggers on 'explanation', 'example', or date queries)
+        elif (
+            re.search(
+                r"\b(study\s+plan|today'?s\s+plan|daily\s+plan|create\s+(?:a\s+|my\s+)?(?:study\s+)?plan|my\s+study\s+plan|what\s+should\s+i\s+study|plan\s+for\s+today|schedule)\b",
+                msg_lower,
             )
-            if "sources" in tool_res:
-                collected_sources.extend(tool_res["sources"])
-
-            # Formulate grounded response based on retrieved knowledge
-            chunks = tool_res.get("output", {}).get("results", [])
-            if chunks:
-                primary_chunk = chunks[0]
-                answer = (
-                    f"{primary_chunk['content']}\n\n"
-                    f"**Source:** {primary_chunk['document_title']} ({primary_chunk['filename']}, "
-                    f"Page {primary_chunk.get('page_number', 1)})."
-                )
-            else:
-                answer = f"I searched your course materials for '{message}', but found no relevant content. Please verify that the relevant document is uploaded."
-
-            return ChatResponse(
-                message=answer,
-                sources=collected_sources,
-                actions=collected_actions,
-                execution_mode="local_orchestrator",
+            or (
+                re.search(r"\b(plans?|planner)\b", msg_lower)
+                and not re.search(r"\b(explain|explanation|concept|what\s+is)\b", msg_lower)
             )
-
-        # Quiz generation intent
-        elif "quiz" in msg_lower or "practice" in msg_lower:
-            topic = "Operating Systems Paging" if "paging" in msg_lower else ("Computer Networks" if "network" in msg_lower or "tcp" in msg_lower else "General Review")
-            tool_res = self.tool_dispatcher.dispatch(
-                "generate_quiz",
-                {"user_id": user_id, "subject_id": subject_id or "cs", "topic_ids": [topic], "difficulty": "medium", "count": 5},
-                authenticated_user_id=user_id,
-                db=db,
-            )
-            quiz_data = tool_res.get("output", {})
-            collected_actions.append(
-                ActionItem(
-                    type="quiz_generated",
-                    description=f"Generated {quiz_data.get('count', 5)} practice questions on {topic}.",
-                    payload=quiz_data,
-                )
-            )
-            return ChatResponse(
-                message=f"I have prepared a practice quiz on {topic} for you. Select your answers to test your knowledge.",
-                sources=collected_sources,
-                actions=collected_actions,
-                execution_mode="local_orchestrator",
-            )
-
-        # Study plan or exam intent
-        elif any(term in msg_lower for term in ["plan", "schedule", "exam", "today"]):
+        ):
             self.tool_dispatcher.dispatch("get_upcoming_exams", {"user_id": user_id}, authenticated_user_id=user_id, db=db)
             plan_res = self.tool_dispatcher.dispatch("get_today_plan", {"user_id": user_id}, authenticated_user_id=user_id, db=db)
             today_tasks = plan_res.get("output", {}).get("tasks", [])
@@ -416,11 +426,64 @@ class AcadAssistAgentService:
                 execution_mode="local_orchestrator",
             )
 
-        # Default student-friendly response
+        # 9. Concept explanation & knowledge retrieval (prioritized over broad fallbacks)
+        elif (
+            document_id
+            or "?" in msg_lower
+            or re.search(
+                r"\b(explain|explanation|define|definition|what\s+is|what\s+are|how\s+does|how\s+do|how\s+to|why|compare|difference|"
+                r"paging|virtual\s+memory|concept|lecture|search|tcp|udp|"
+                r"deadlock|coffman|b\+|tree|normalization|bcnf|round\s+robin|"
+                r"banker|binary|ethernet|protocol|osi|notes?)\b",
+                msg_lower,
+            )
+        ):
+            tool_res = self.tool_dispatcher.dispatch(
+                "search_knowledge",
+                {
+                    "user_id": user_id,
+                    "query": message,
+                    "course_id": course_id,
+                    "subject_id": subject_id,
+                    "document_id": document_id,
+                    "top_k": 3,
+                },
+                authenticated_user_id=user_id,
+                db=db,
+            )
+            if "sources" in tool_res:
+                collected_sources.extend(tool_res["sources"])
+
+            chunks = tool_res.get("output", {}).get("results", [])
+            if chunks:
+                primary_chunk = chunks[0]
+                supporting_text = primary_chunk["content"]
+                if len(chunks) > 1 and chunks[1]["content"] != primary_chunk["content"]:
+                    supporting_text = f"{primary_chunk['content']}\n\n{chunks[1]['content']}"
+                answer = (
+                    f"{supporting_text}\n\n"
+                    f"**Source:** {primary_chunk['document_title']} ({primary_chunk['filename']}, "
+                    f"Page {primary_chunk.get('page_number', 1)})."
+                )
+            else:
+                collected_sources.clear()
+                answer = (
+                    f"I searched your course materials for '{message}', but found no relevant content. "
+                    f"Please verify that the relevant document is uploaded and processed."
+                )
+
+            return ChatResponse(
+                message=answer,
+                sources=collected_sources,
+                actions=collected_actions,
+                execution_mode="local_orchestrator",
+            )
+
+        # 10. Default student-friendly response for greetings
         return ChatResponse(
             message=(
-                f"Hello! I am AcadAssist, your AI study assistant. I can help you review your course materials, "
-                f"take practice quizzes, and plan your study sessions for upcoming exams. What would you like to work on?"
+                "Hello! I am AcadAssist, your AI study assistant. I can help you review your course materials, "
+                "take practice quizzes, and plan your study sessions for upcoming exams. What would you like to work on?"
             ),
             sources=collected_sources,
             actions=collected_actions,

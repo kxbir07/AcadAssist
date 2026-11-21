@@ -7,15 +7,23 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp, type Note } from '../context/AppContext';
 import Modal from '../components/ui/Modal';
 import { deleteFile, getFile, saveFile } from '../services/fileStore';
-import { uploadDocument, downloadDocument, displayDocumentStatus, isDocumentReady, formatApiError } from '../services/api';
+import {
+  uploadDocument,
+  downloadDocument,
+  fetchDocumentBlob,
+  summarizeBackendDocument,
+  searchKnowledgeChunks,
+  displayDocumentStatus,
+  isDocumentReady,
+  type KnowledgeChunkSearchResult,
+} from '../services/api';
 
 type Material = ReturnType<typeof useApp>['knowledgeMaterials'][number];
-
 
 export default function Knowledge() {
   const {
     knowledgeMaterials, addKnowledgeMaterial, updateKnowledgeMaterial, deleteKnowledgeMaterial,
-    notes, addNote, updateNote, deleteNote, pushToast, subjects, quizzes, courses
+    notes, addNote, updateNote, deleteNote, pushToast, subjects, quizzes, courses, reloadAppData
   } = useApp();
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -39,6 +47,33 @@ export default function Knowledge() {
   const [editNote, setEditNote] = useState<Note | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Material | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Semantic / Hybrid Chunk Search state
+  const [chunkResults, setChunkResults] = useState<KnowledgeChunkSearchResult[]>([]);
+  const [searchingChunks, setSearchingChunks] = useState(false);
+
+  useEffect(() => {
+    const trimmed = q.trim();
+    if (trimmed.length < 3) {
+      setChunkResults([]);
+      return;
+    }
+    let cancelled = false;
+    setSearchingChunks(true);
+    const timer = window.setTimeout(() => {
+      searchKnowledgeChunks(trimmed, { topK: 5 })
+        .then(res => {
+          if (!cancelled) setChunkResults(res);
+        })
+        .finally(() => {
+          if (!cancelled) setSearchingChunks(false);
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [q]);
 
   const docs = useMemo(
     () =>
@@ -70,11 +105,15 @@ export default function Knowledge() {
   );
 
   const processedCount = knowledgeMaterials.filter(
-    m => m.status === 'Stored Locally · Ready for Processing' || m.status === 'Ready'
+    m => isDocumentReady(m.rawStatus) || m.status === 'Processed · Ready' || m.status === 'Ready'
   ).length;
 
   const onFile = (f: File | null) => {
     if (!f) return;
+    if (f.size === 0) {
+      pushToast('Uploaded file cannot be empty (0 bytes)', 'error');
+      return;
+    }
     if (f.size > 50 * 1024 * 1024) {
       pushToast('Maximum file size is 50 MB', 'error');
       return;
@@ -105,12 +144,14 @@ export default function Knowledge() {
 
       const uploadRes = await uploadDocument(file, courseId, subjectId);
       const ext = file.name.split('.').pop()?.toLowerCase();
-      const material = {
+      const material: Material = {
         id: uploadRes.id,
         name: file.name,
         subject: selectedSub?.name || uploadSubject,
+        subjectId: subjectId,
+        courseId: courseId,
         type: (ext === 'pptx' ? 'PPT' : ext?.toUpperCase()) as Material['type'],
-        size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
+        size: `${Math.max(0.1, file.size / 1024 / 1024).toFixed(1)} MB`,
         addedOn: new Date().toISOString(),
         status: displayDocumentStatus(uploadRes.status),
         rawStatus: uploadRes.status,
@@ -133,16 +174,16 @@ export default function Knowledge() {
       setFile(null);
       setUploadOpen(false);
       if (isDocumentReady(material.rawStatus)) {
-        pushToast('Material uploaded and processed securely');
+        pushToast('Material uploaded, chunked, embedded, and indexed into Knowledge Base');
+        reloadAppData();
       } else {
         pushToast(
-          `Uploaded, but processing didn't finish (${displayDocumentStatus(uploadRes.status)}). It may not be usable for quizzes yet.`,
+          `Uploaded, but processing failed (${displayDocumentStatus(uploadRes.status)}).`,
           'error'
         );
       }
     } catch (e) {
-      console.error('Failed to upload file:', e);
-      pushToast(formatApiError(e, 'Something went wrong while processing this document. Please try again.'), 'error');
+      pushToast(e instanceof Error ? e.message : 'Could not save the file', 'error');
     } finally {
       setBusy(false);
     }
@@ -169,7 +210,6 @@ export default function Knowledge() {
     }
   };
 
-
   const openPreview = async (m: Material) => {
     setPreview(m);
   };
@@ -182,8 +222,40 @@ export default function Knowledge() {
     navigate(`/assistant?materialId=${encodeURIComponent(m.id)}&subject=${encodeURIComponent(m.subject)}`);
   };
 
-  const generate = (m: Material, kind: 'Summary' | 'AI Notes' | 'Exam Notes' | 'Easy Explanation') => {
+  const generate = async (m: Material, kind: 'Summary' | 'AI Notes' | 'Exam Notes' | 'Easy Explanation') => {
+    setActions(null);
     const clean = m.name.replace(/\.[^.]+$/, '');
+    if (m.id) {
+      const modeMap: Record<typeof kind, 'quick' | 'detailed' | 'exam' | 'revision'> = {
+        Summary: 'quick',
+        'AI Notes': 'detailed',
+        'Exam Notes': 'exam',
+        'Easy Explanation': 'revision',
+      };
+      const sumRes = await summarizeBackendDocument(m.id, modeMap[kind]);
+      if (sumRes && sumRes.summary) {
+        const sectionBullets = (sumRes.sections || [])
+          .slice(0, 6)
+          .map(s => `• ${s.section}${s.page ? ` (Page ${s.page})` : ''}: ${s.overview || ''}`)
+          .join('\n');
+        const fullContent = sectionBullets
+          ? `${sumRes.summary}\n\nKey Document Sections:\n${sectionBullets}`
+          : sumRes.summary;
+        addNote({
+          id: crypto.randomUUID(),
+          title: `${clean} — ${kind}`,
+          subject: m.subject,
+          source: m.name,
+          type: kind,
+          content: fullContent,
+          createdAt: 'Just now',
+        });
+        setTab('Notes');
+        pushToast(`Grounded ${kind} generated from ${m.name}`);
+        return;
+      }
+    }
+
     const templates: { [K in typeof kind]: string } = {
       Summary: `${clean} — Concise Curriculum Summary\n\n• Core Concepts: Definitional outline and mechanism.\n• Formulas & Theorems: Exact mathematical bounds and properties.\n• Edge Cases: Common edge cases and exam tricks.\n• Key Diagrams: Process interaction and flow.`,
       'AI Notes': `${clean} — Comprehensive Exam Notes\n\n1. Foundational Theory\n2. Detailed Step-by-Step Mechanisms\n3. Proofs / Derivations\n4. Comparative Analysis (Trade-offs)\n5. High-Frequency Exam Questions with Explanations`,
@@ -199,8 +271,8 @@ export default function Knowledge() {
       content: templates[kind],
       createdAt: 'Just now',
     });
+    setTab('Notes');
     pushToast(`${kind} created`);
-    setActions(null);
   };
 
   const removeDoc = async () => {
@@ -208,7 +280,7 @@ export default function Knowledge() {
     deleteKnowledgeMaterial(deleteTarget.id || deleteTarget.name);
     await deleteFile(deleteTarget.id || deleteTarget.name);
     setDeleteTarget(null);
-    pushToast('Document deleted', 'info');
+    pushToast('Document deleted from Knowledge Base', 'info');
   };
 
   return (
@@ -219,12 +291,12 @@ export default function Knowledge() {
           <div className="flex items-center gap-2 mb-1">
             <span className="eyebrow">YOUR KNOWLEDGE BASE</span>
             <span className="soft-badge" style={{ fontSize: '0.62rem', padding: '2px 8px' }}>
-              Azure Storage Ready
+              Hybrid RAG Indexed
             </span>
           </div>
           <h1>Everything you study, organized.</h1>
           <p>
-            Store materials by subject, preview documents, download originals, and generate exam notes or quizzes.
+            Upload PDF, DOCX, PPTX, or TXT materials, search inside document chunks, generate grounded summaries, and launch quizzes.
           </p>
         </div>
         <button className="btn primary" onClick={() => setUploadOpen(true)}>
@@ -254,7 +326,7 @@ export default function Knowledge() {
             <span className="text-lg font-bold text-[var(--color-text-dark)] leading-none block">
               {processedCount}
             </span>
-            <small className="text-[.65rem] text-[var(--color-text-muted)]">Stored Locally · Ready for Processing</small>
+            <small className="text-[.65rem] text-[var(--color-text-muted)]">Processed & Indexed</small>
           </div>
         </div>
 
@@ -266,7 +338,7 @@ export default function Knowledge() {
             <span className="text-lg font-bold text-[var(--color-text-dark)] leading-none block">
               {notes.length}
             </span>
-            <small className="text-[.65rem] text-[var(--color-text-muted)]">AI Notes Generated</small>
+            <small className="text-[.65rem] text-[var(--color-text-muted)]">AI Notes & Summaries</small>
           </div>
         </div>
 
@@ -276,9 +348,9 @@ export default function Knowledge() {
           </div>
           <div>
             <span className="text-xs font-bold text-[var(--color-text-dark)] leading-tight block">
-              Local Browser Cache
+              1536-Dim Vectors
             </span>
-            <small className="text-[.62rem] text-[var(--color-text-muted)]">Ready for Azure Blob Sync</small>
+            <small className="text-[.62rem] text-[var(--color-text-muted)]">BM25 + Cosine Hybrid Index</small>
           </div>
         </div>
       </div>
@@ -331,7 +403,7 @@ export default function Knowledge() {
           <input
             value={q}
             onChange={e => setQ(e.target.value)}
-            placeholder="Search documents, notes or subjects..."
+            placeholder="Search documents, notes, or concepts inside indexed chunks..."
           />
         </div>
         <select className="select" value={subject} onChange={e => setSubject(e.target.value)}>
@@ -354,6 +426,38 @@ export default function Knowledge() {
           <option>Name</option>
         </select>
       </div>
+
+      {/* Semantic Chunk Search Results when user queries inside documents */}
+      {q.trim().length >= 3 && (searchingChunks || chunkResults.length > 0) && (
+        <div className="card p-4">
+          <div className="section-title-row mb-2">
+            <div>
+              <div className="section-kicker">KNOWLEDGE BASE HYBRID SEARCH</div>
+              <h3 className="text-sm font-bold">
+                {searchingChunks ? 'Searching indexed document chunks…' : `Matching Document Excerpts (${chunkResults.length})`}
+              </h3>
+            </div>
+            <span className="soft-badge text-[.62rem]">BM25 + Vector Retrieval</span>
+          </div>
+          <div className="space-y-2">
+            {chunkResults.map(ch => (
+              <div key={ch.chunk_id} className="p-3 rounded-xl bg-[var(--color-page-bg)] border border-[var(--color-card-border)] text-xs">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <b className="text-[var(--color-text-dark)]">
+                    📄 {ch.document_title || ch.filename}
+                    {ch.page_number ? ` · Page ${ch.page_number}` : ''}
+                    {ch.slide_number ? ` · Slide ${ch.slide_number}` : ''}
+                  </b>
+                  <span className="text-[.65rem] font-bold text-[var(--color-green-accent)]">
+                    Relevance: {Math.round(ch.score * 100)}%
+                  </span>
+                </div>
+                <p className="text-[var(--color-text-muted)] leading-relaxed m-0">{ch.content}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Documents Grid */}
       {tab === 'Documents' ? (
@@ -400,12 +504,12 @@ export default function Knowledge() {
                     <button onClick={() => generate(m, 'Summary')}>
                       <Sparkles size={14} /> AI Summary
                     </button>
-                    <button onClick={() => generate(m, 'AI Notes')}>
+                    <button onClick={() => generate(m, 'Exam Notes')}>
                       <BookOpen size={14} /> Exam Notes
                     </button>
                     <button
                       onClick={() => {
-                        navigate(`/assessment?source=document&material=${encodeURIComponent(m.name)}`);
+                        navigate(`/assessment?source=document&document_id=${encodeURIComponent(m.id || '')}&material=${encodeURIComponent(m.name)}`);
                         setActions(null);
                       }}
                     >
@@ -427,36 +531,11 @@ export default function Knowledge() {
                 )}
               </div>
 
-              <div className="flex items-center justify-between mt-2.5 mb-1">
+              <div className="flex items-center justify-between mt-2">
                 <span className="doc-type">{m.type}</span>
-                {/* Visual Document Lifecycle (Task 9) */}
-                {m.rawStatus === 'processed' ? (
-                  <div className="flex items-center gap-1 text-[0.62rem] font-bold text-emerald-700 dark:text-emerald-400" title="Uploaded, processed, and indexed for search and quizzes">
-                    <span>✓ Uploaded</span>
-                    <span>·</span>
-                    <span>✓ Processed</span>
-                    <span>·</span>
-                    <span>✓ Indexed</span>
-                  </div>
-                ) : m.rawStatus === 'processing' ? (
-                  <div className="flex items-center gap-1 text-[0.62rem] font-bold text-amber-600 dark:text-amber-400" title="Document is currently being processed and indexed">
-                    <span>✓ Uploaded</span>
-                    <span>·</span>
-                    <span className="animate-pulse">⏳ Processing…</span>
-                  </div>
-                ) : m.rawStatus === 'failed' ? (
-                  <div className="flex items-center gap-1 text-[0.62rem] font-bold text-red-600 dark:text-red-400" title="Processing error occurred">
-                    <span>✓ Uploaded</span>
-                    <span>·</span>
-                    <span>⚠️ Processing failed</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1 text-[0.62rem] font-bold text-blue-600 dark:text-blue-400" title="Document uploaded and stored; ready for processing">
-                    <span>✓ Uploaded</span>
-                    <span>·</span>
-                    <span>⏳ Ready to Process</span>
-                  </div>
-                )}
+                <span className={`text-[.62rem] font-bold flex items-center gap-1 ${m.rawStatus === 'failed' ? 'text-red-600' : 'text-green-600'}`}>
+                  ● {m.status}
+                </span>
               </div>
 
               <h3 className="line-clamp-2">{m.name}</h3>
@@ -464,10 +543,12 @@ export default function Knowledge() {
                 {m.subject} · {m.size}
               </p>
 
-              {/* Document Action Buttons: [Ask AI], [Quiz], [Preview] (Task 9) */}
-              <div className="doc-actions pt-2.5 border-t border-[var(--color-border-light)] mt-2.5">
+              <div className="doc-actions">
+                <button className="btn secondary text-xs" onClick={() => openPreview(m)}>
+                  <Eye size={13} /> View
+                </button>
                 <button
-                  className="btn primary text-xs"
+                  className="btn subtle text-xs"
                   onClick={() => askAi(m)}
                   disabled={!m.id}
                   title={m.id ? 'Query AI with this document context' : 'Cannot Ask AI: Document ID is missing'}
@@ -475,24 +556,17 @@ export default function Knowledge() {
                   <MessageSquare size={13} /> Ask AI
                 </button>
                 <button
-                  className="btn secondary text-xs"
-                  onClick={() => {
-                    navigate(`/assessment?source=document&material=${encodeURIComponent(m.name)}&document_id=${encodeURIComponent(m.id || '')}`);
-                  }}
-                  disabled={m.rawStatus === 'failed'}
-                  title="Generate assessment from this document"
-                >
-                  <FileQuestion size={13} /> Quiz
-                </button>
-                <button className="btn subtle text-xs" onClick={() => openPreview(m)}>
-                  <Eye size={13} /> Preview
-                </button>
-                <button
-                  className="icon-button ml-auto"
+                  className="icon-button"
                   onClick={() => updateKnowledgeMaterial(m.id || m.name, { starred: !m.starred })}
                   aria-label="Star document"
                 >
                   <Star size={14} fill={m.starred ? 'currentColor' : 'none'} />
+                </button>
+                <button
+                  className="btn subtle text-xs ml-auto"
+                  onClick={() => generate(m, 'Summary')}
+                >
+                  <Sparkles size={13} /> Summary
                 </button>
               </div>
             </div>
@@ -542,49 +616,19 @@ export default function Knowledge() {
         </div>
       )}
 
-      {/* Empty State (Task 4) */}
-      {tab === 'Documents' && docs.length === 0 && (
-        <div className="empty-state py-10">
-          {knowledgeMaterials.length === 0 ? (
-            <>
-              <div className="text-3xl mb-2">📚</div>
-              <h3 className="text-base font-bold text-[var(--color-text-dark)]">No study material yet</h3>
-              <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto mt-1 mb-4">
-                Upload your notes or PDF to start building your knowledge base.
-              </p>
-              <button className="btn primary" onClick={() => setUploadOpen(true)}>
-                <UploadCloud size={15} /> Upload Document
-              </button>
-            </>
-          ) : (
-            <>
-              <div className="text-3xl mb-2">🔎</div>
-              <h3 className="text-base font-bold text-[var(--color-text-dark)]">No matching study material found</h3>
-              <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto mt-1 mb-4">
-                Try changing your search keywords or clearing active filters to find your study documents.
-              </p>
-              <button
-                className="btn secondary text-xs"
-                onClick={() => {
-                  setQ('');
-                  setSubject('All');
-                  setType('All');
-                }}
-              >
-                Clear Filters
-              </button>
-            </>
-          )}
-        </div>
-      )}
-
-      {tab === 'Notes' && noteList.length === 0 && (
-        <div className="empty-state py-10">
-          <div className="text-3xl mb-2">📝</div>
-          <h3 className="text-base font-bold text-[var(--color-text-dark)]">No notes available yet</h3>
-          <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto mt-1 mb-4">
-            Generate high-yield notes using AI or create your own study notes.
+      {/* Empty State */}
+      {((tab === 'Documents' && !docs.length) || (tab === 'Notes' && !noteList.length)) && (
+        <div className="empty-state">
+          <Search size={32} />
+          <h3>No study material found</h3>
+          <p>
+            {q || subject !== 'All' || type !== 'All'
+              ? 'Try changing your search filters to find relevant materials.'
+              : 'No study material yet. Upload your first PDF, PPTX, DOCX or TXT to build your Knowledge Base.'}
           </p>
+          <button className="btn primary mt-3" onClick={() => setUploadOpen(true)}>
+            <UploadCloud size={15} /> Upload course material
+          </button>
         </div>
       )}
 
@@ -593,7 +637,7 @@ export default function Knowledge() {
         open={uploadOpen}
         onClose={() => !busy && setUploadOpen(false)}
         title="Add study material"
-        subtitle="Stored in local browser cache. Ready to synchronize with Azure Blob Storage upon backend connection."
+        subtitle="Automatically parsed, normalized, chunked, embedded (1536-dim), and indexed for grounded Q&A and quizzes."
       >
         {file ? (
           <>
@@ -602,7 +646,7 @@ export default function Knowledge() {
               <span>
                 <b>{file.name}</b>
                 <br />
-                {(file.size / 1024 / 1024).toFixed(1)} MB
+                {Math.max(0.1, file.size / 1024 / 1024).toFixed(1)} MB
               </span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', margin: '1rem 0' }}>
@@ -643,7 +687,7 @@ export default function Knowledge() {
                 Choose another
               </button>
               <button className="btn primary" disabled={busy} onClick={createUpload}>
-                {busy ? 'Saving…' : 'Upload & add'}
+                {busy ? 'Uploading & Indexing…' : 'Upload & Process'}
               </button>
             </div>
           </>
@@ -675,7 +719,7 @@ export default function Knowledge() {
               className="btn secondary"
               onClick={() => askAi(preview)}
               disabled={!preview.id}
-              title={preview.id ? "Ask AI about this document" : "Cannot Ask AI: Document ID is missing"}
+              title={preview.id ? 'Ask AI about this document' : 'Cannot Ask AI: Document ID is missing'}
             >
               <MessageSquare size={14} /> Ask AI about this document
             </button>
@@ -685,7 +729,7 @@ export default function Knowledge() {
             <button
               className="btn primary"
               onClick={() => {
-                navigate(`/assessment?source=document&material=${encodeURIComponent(preview.name)}`);
+                navigate(`/assessment?source=document&document_id=${encodeURIComponent(preview.id || '')}&material=${encodeURIComponent(preview.name)}`);
                 setPreview(null);
               }}
             >
@@ -703,7 +747,7 @@ export default function Knowledge() {
         subtitle={previewNote ? `${previewNote.subject} · ${previewNote.type}` : ''}
         wide
       >
-        {previewNote && <div className="preview-paper">{previewNote.content}</div>}
+        {previewNote && <div className="preview-paper whitespace-pre-wrap">{previewNote.content}</div>}
       </Modal>
 
       {/* Edit Document Modal */}
@@ -740,7 +784,7 @@ export default function Knowledge() {
         open={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
         title="Delete document"
-        subtitle="This removes the document from this browser's Knowledge library."
+        subtitle="This removes the document and its indexed chunks from your Knowledge Base."
       >
         <p className="text-sm">
           Delete <b>{deleteTarget?.name}</b>? AI notes created from it will remain available.
@@ -767,13 +811,20 @@ function DocumentPreview({ material }: { material: Material }) {
     let active = true;
     let objectUrl: string | undefined;
 
-    getFile(material.id || material.name)
+    const loadBlob = async (): Promise<Blob | null> => {
+      const localBlob = await getFile(material.id || material.name);
+      if (localBlob) return localBlob;
+      if (material.id) {
+        return await fetchDocumentBlob(material.id);
+      }
+      return null;
+    };
+
+    loadBlob()
       .then(async blob => {
         if (!active) return;
         if (!blob) {
-          setError(
-            'Original file is stored as a curriculum reference in this demo workspace. When a real file is uploaded, the preview will render in-browser.'
-          );
+          setError('Document file preview is unavailable.');
           setUrl(null);
           setText('');
           return;

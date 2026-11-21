@@ -12,6 +12,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _clean_env_str(val: str | None) -> str | None:
+    if val is None:
+        return None
+    cleaned = "".join(val.split()).strip()
+    return cleaned if cleaned else None
+
+
 class AssessmentSettings(BaseModel):
     """Configurable settings and thresholds for Person 3 Assessment Subsystem."""
 
@@ -89,9 +96,13 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         return not self.is_production()
 
+    def is_test(self) -> bool:
+        """Check if currently running in automated test environment."""
+        return self.ENVIRONMENT.lower() in ("test", "testing")
+
     @property
     def azure_storage_account(self) -> str | None:
-        return self.AZURE_STORAGE_ACCOUNT
+        return _clean_env_str(self.AZURE_STORAGE_ACCOUNT)
 
     @property
     def azure_storage_container(self) -> str:
@@ -99,15 +110,16 @@ class Settings(BaseSettings):
 
     @property
     def azure_storage_endpoint(self) -> str | None:
-        if not self.AZURE_STORAGE_ACCOUNT:
+        acct = self.azure_storage_account
+        if not acct:
             return None
-        if self.AZURE_STORAGE_ACCOUNT.startswith("http"):
-            return self.AZURE_STORAGE_ACCOUNT
-        return f"https://{self.AZURE_STORAGE_ACCOUNT}.blob.core.windows.net"
+        if acct.startswith("http"):
+            return acct
+        return f"https://{acct}.blob.core.windows.net"
 
     @property
     def azure_search_endpoint(self) -> str | None:
-        return self.AZURE_SEARCH_ENDPOINT
+        return _clean_env_str(self.AZURE_SEARCH_ENDPOINT)
 
     @property
     def azure_search_index(self) -> str:
@@ -115,7 +127,7 @@ class Settings(BaseSettings):
 
     @property
     def foundry_project_endpoint(self) -> str | None:
-        return self.FOUNDRY_PROJECT_ENDPOINT
+        return _clean_env_str(self.FOUNDRY_PROJECT_ENDPOINT)
 
     @property
     def foundry_project(self) -> str:
@@ -135,27 +147,20 @@ class Settings(BaseSettings):
 
     @property
     def is_foundry_configured(self) -> bool:
-        """True if LLM generation (quizzes, summaries, chat) can actually run.
-
-        Mirrors FoundryProjectManager.is_configured: a Foundry Project endpoint
-        is only one of three valid ways to authenticate. A direct Azure OpenAI
-        key/endpoint pair or a plain OpenAI API key are equally sufficient and
-        must be reflected here, or this health flag misleadingly reports
-        "not configured" for deployments that are actually working.
-        """
+        """True if LLM generation (quizzes, summaries, chat) can actually run."""
         has_azure_key_pair = bool(
             (self.AZURE_OPENAI_API_KEY or self.AZURE_API_KEY)
             and (self.AZURE_OPENAI_ENDPOINT or self.AZURE_ENDPOINT)
         )
-        return bool(self.FOUNDRY_PROJECT_ENDPOINT) or has_azure_key_pair or bool(self.OPENAI_API_KEY)
+        return bool(self.foundry_project_endpoint) or has_azure_key_pair or bool(self.OPENAI_API_KEY)
 
     @property
     def is_search_configured(self) -> bool:
-        return bool(self.AZURE_SEARCH_ENDPOINT)
+        return bool(self.azure_search_endpoint)
 
     @property
     def is_storage_configured(self) -> bool:
-        return bool(self.AZURE_STORAGE_ACCOUNT or self.AZURE_STORAGE_CONNECTION_STRING)
+        return bool(self.azure_storage_account or self.AZURE_STORAGE_CONNECTION_STRING)
 
     # Assessment Specific Settings (Person 3)
     assessment: AssessmentSettings = Field(default_factory=AssessmentSettings)

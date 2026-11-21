@@ -42,6 +42,8 @@ def init_db(target_engine=None) -> None:
                     conn.execute(text("ALTER TABLE users ADD COLUMN field_of_study VARCHAR(255) DEFAULT 'Computer Science'"))
                 if "bio" not in user_cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN bio TEXT"))
+                if "workspace_state" not in user_cols:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN workspace_state TEXT"))
                 if "updated_at" not in user_cols:
                     conn.execute(text("ALTER TABLE users ADD COLUMN updated_at DATETIME"))
 
@@ -58,14 +60,13 @@ def init_db(target_engine=None) -> None:
                 if "updated_at" not in doc_cols:
                     conn.execute(text("ALTER TABLE documents ADD COLUMN updated_at DATETIME"))
 
-            if "chunks" in existing_tables:
-                chunk_cols = {c["name"] for c in inspector.get_columns("chunks")}
+            if "document_chunks" in existing_tables:
+                chunk_cols = {c["name"] for c in inspector.get_columns("document_chunks")}
                 if "visibility" not in chunk_cols:
-                    conn.execute(text("ALTER TABLE chunks ADD COLUMN visibility VARCHAR(20) DEFAULT 'private'"))
-    except Exception as e:
+                    conn.execute(text("ALTER TABLE document_chunks ADD COLUMN visibility VARCHAR(20) DEFAULT 'private'"))
+    except Exception:
         # If running on in-memory or already migrated table, ignore alter errors
         pass
-
 
 
 def get_db() -> Generator[Session, None, None]:

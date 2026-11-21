@@ -1,11 +1,18 @@
-import { useState, type FormEvent } from 'react';
-import { Pencil, Save, Mail, MapPin, GraduationCap, Flame, Quote, BookOpen } from 'lucide-react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Pencil, Save, Mail, MapPin, GraduationCap, Flame, Quote, BookOpen, Check, RotateCcw, KeyRound } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import Modal from '../components/ui/Modal';
+import { changePassword } from '../services/auth';
 
 export default function Profile() {
-  const { user, updateUser, subjects, courses, pushToast } = useApp();
+  const { user, updateUser, subjects, courses, coursePreferences, setCoursePreferences, pushToast } = useApp();
   const [editing, setEditing] = useState(false);
+  const [pwdOpen, setPwdOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [pwdBusy, setPwdBusy] = useState(false);
+
   const [name, setName] = useState(user.fullName);
   const [role, setRole] = useState(user.role);
   const [field, setField] = useState(user.field);
@@ -14,7 +21,26 @@ export default function Profile() {
   const [quote, setQuote] = useState(user.quote);
   const [email, setEmail] = useState(user.email);
   const [location, setLocation] = useState(user.location);
+  const availableFields = useMemo(() => Array.from(new Set(courses.map(c => c.specialization || c.category).filter(Boolean))).sort((a,b)=>a.localeCompare(b)), [courses]);
+  const [selectedFields, setSelectedFields] = useState<string[]>(coursePreferences);
+  const [fieldSearch, setFieldSearch] = useState('');
+  const visibleFields = useMemo(() => availableFields.filter(x => x.toLowerCase().includes(fieldSearch.toLowerCase())), [availableFields, fieldSearch]);
   const enrolled = courses.filter(c => c.enrolled);
+
+  useEffect(() => {
+    setName(user.fullName);
+    setRole(user.role);
+    setField(user.field);
+    setAcademicLevel(user.academicLevel);
+    setBio(user.bio);
+    setQuote(user.quote);
+    setEmail(user.email);
+    setLocation(user.location);
+  }, [user]);
+
+  useEffect(() => {
+    setSelectedFields(coursePreferences);
+  }, [coursePreferences]);
 
   const save = (e: FormEvent) => {
     e.preventDefault();
@@ -31,6 +57,35 @@ export default function Profile() {
     });
     setEditing(false);
     pushToast('Profile saved');
+  };
+
+  const handlePasswordChange = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!currentPassword || !newPassword) {
+      pushToast('Please fill out current and new passwords.', 'error');
+      return;
+    }
+    if (newPassword.length < 6) {
+      pushToast('New password must be at least 6 characters.', 'error');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      pushToast('New password and confirmation do not match.', 'error');
+      return;
+    }
+    setPwdBusy(true);
+    try {
+      const msg = await changePassword(currentPassword, newPassword);
+      pushToast(msg || 'Password updated successfully.');
+      setPwdOpen(false);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : 'Failed to change password.', 'error');
+    } finally {
+      setPwdBusy(false);
+    }
   };
 
   return (
@@ -54,9 +109,14 @@ export default function Profile() {
             ))}
           </div>
         </div>
-        <button className="btn primary" onClick={() => setEditing(true)}>
-          <Pencil size={15} /> Edit profile
-        </button>
+        <div className="flex gap-2 flex-wrap">
+          <button className="btn secondary" onClick={() => setPwdOpen(true)}>
+            <KeyRound size={15} /> Change password
+          </button>
+          <button className="btn primary" onClick={() => setEditing(true)}>
+            <Pencil size={15} /> Edit profile
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_.8fr] gap-6">
@@ -86,6 +146,30 @@ export default function Profile() {
               </div>
             </div>
             <blockquote>“{user.quote}”</blockquote>
+          </div>
+
+          <div className="card p-5">
+            <div className="section-title-row">
+              <div>
+                <div className="section-kicker">LEARNING PREFERENCES</div>
+                <h2>What do you want to learn?</h2>
+              </div>
+              <span className="soft-badge">{selectedFields.length ? `${selectedFields.length} selected` : '20 general courses'}</span>
+            </div>
+            <p className="muted text-sm mb-4">Choose one or more academic fields. Courses will use these preferences as your default scope.</p>
+            <input className="input mb-3" value={fieldSearch} onChange={e=>setFieldSearch(e.target.value)} placeholder="Search academic fields..." />
+            <div className="chip-row" style={{maxHeight:'260px',overflowY:'auto'}}>
+              {visibleFields.map(fieldName => {
+                const selected = selectedFields.includes(fieldName);
+                return <button key={fieldName} type="button" className={`filter-chip ${selected ? 'active' : ''}`} onClick={()=>setSelectedFields(prev=>selected?prev.filter(x=>x!==fieldName):[...prev,fieldName])}>
+                  {selected && <Check size={13}/>} {fieldName}
+                </button>;
+              })}
+            </div>
+            <div className="modal-actions mt-4">
+              <button type="button" className="btn secondary" onClick={()=>setSelectedFields(coursePreferences)}><RotateCcw size={14}/>Reset changes</button>
+              <button type="button" className="btn primary" onClick={()=>{setCoursePreferences(selectedFields);pushToast('Learning preferences saved','success')}}><Save size={14}/>Save learning preferences</button>
+            </div>
           </div>
 
           <div className="card p-5">
@@ -202,6 +286,52 @@ export default function Profile() {
             </button>
             <button type="submit" className="btn primary">
               <Save size={14} /> Save profile
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal open={pwdOpen} onClose={() => setPwdOpen(false)} title="Change Password">
+        <form onSubmit={handlePasswordChange} className="space-y-3">
+          <label className="block text-xs font-semibold">
+            Current Password
+            <input
+              type="password"
+              className="input mt-1"
+              value={currentPassword}
+              onChange={e => setCurrentPassword(e.target.value)}
+              placeholder="Enter current password"
+              required
+            />
+          </label>
+          <label className="block text-xs font-semibold">
+            New Password
+            <input
+              type="password"
+              className="input mt-1"
+              value={newPassword}
+              onChange={e => setNewPassword(e.target.value)}
+              placeholder="At least 6 characters"
+              required
+            />
+          </label>
+          <label className="block text-xs font-semibold">
+            Confirm New Password
+            <input
+              type="password"
+              className="input mt-1"
+              value={confirmPassword}
+              onChange={e => setConfirmPassword(e.target.value)}
+              placeholder="Repeat new password"
+              required
+            />
+          </label>
+          <div className="modal-actions">
+            <button type="button" className="btn secondary" onClick={() => setPwdOpen(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn primary" disabled={pwdBusy}>
+              <KeyRound size={14} /> {pwdBusy ? 'Updating...' : 'Update Password'}
             </button>
           </div>
         </form>

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   CheckCircle2, FileQuestion, History, RotateCcw, Sparkles, Target, X, Clock3,
   AlertCircle, AlertTriangle, ArrowRight, ArrowLeft, Bookmark, Check,
@@ -7,9 +7,10 @@ import {
 import { useSearchParams } from 'react-router-dom';
 import { useApp, type Quiz } from '../context/AppContext';
 import Modal from '../components/ui/Modal';
-import { generateQuiz, submitQuiz, isDocumentReady, formatApiError } from '../services/api';
+import { generateQuiz, submitQuiz, isDocumentReady } from '../services/api';
 
 const TOPICS = [
+  'Paging',
   'Deadlocks',
   'CPU Scheduling',
   'Memory Management',
@@ -17,11 +18,18 @@ const TOPICS = [
   'Application Layer',
   'Normalization',
   'B+ Trees & Indexing',
-  'Graph Traversals (BFS/DFS)',
-  'Linear Regression',
+  'Binary Search',
 ];
 
 type AssessmentSource = 'Topic' | 'Subject' | 'Knowledge' | 'Notes' | 'Weak Topics';
+
+function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(s / 60);
+  const rem = s % 60;
+  if (mins === 0) return `${rem}s`;
+  return `${mins}m ${String(rem).padStart(2, '0')}s`;
+}
 
 export default function Assessment() {
   const {
@@ -44,7 +52,7 @@ export default function Assessment() {
 
   const [source, setSource] = useState<AssessmentSource>(initialSource);
   const [subject, setSubject] = useState(params.get('subject') || subjects[0]?.name || 'Operating Systems');
-  const [topic, setTopic] = useState(params.get('material') || 'Deadlocks');
+  const [topic, setTopic] = useState(params.get('material') || params.get('topic') || 'Paging');
   const [selectedDocId, setSelectedDocId] = useState<string>(
     params.get('document_id') || params.get('docId') || ''
   );
@@ -57,7 +65,9 @@ export default function Assessment() {
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [result, setResult] = useState<number | null>(null);
-  const [showReview, setShowReview] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [showReview, setShowReview] = useState(true);
   const [history, setHistory] = useState(false);
   const [timer, setTimer] = useState(0);
   const [confirm, setConfirm] = useState(false);
@@ -65,6 +75,7 @@ export default function Assessment() {
   const [flagged, setFlagged] = useState<Record<string, boolean>>({});
   const [navFilter, setNavFilter] = useState<'all' | 'unanswered' | 'flagged'>('all');
   const [solutionFilter, setSolutionFilter] = useState<'all' | 'incorrect' | 'flagged'>('all');
+  const startTimeRef = useRef<number>(Date.now());
 
   useEffect(() => {
     if (source === 'Knowledge' && knowledgeMaterials.length > 0) {
@@ -97,11 +108,17 @@ export default function Assessment() {
     return () => document.body.classList.remove('quiz-active');
   }, [active]);
 
+  // Track both countdown timer (when timed) and elapsed seconds (for all quizzes)
   useEffect(() => {
-    if (!mode || result !== null || timer <= 0) return;
-    const id = window.setInterval(() => setTimer(t => Math.max(0, t - 1)), 1000);
+    if (!active || result !== null) return;
+    const id = window.setInterval(() => {
+      setElapsedSeconds(Math.max(1, Math.round((Date.now() - startTimeRef.current) / 1000)));
+      if (mode) {
+        setTimer(t => Math.max(0, t - 1));
+      }
+    }, 1000);
     return () => window.clearInterval(id);
-  }, [mode, result, timer]);
+  }, [active, mode, result]);
 
   const toggleFlag = useCallback((id: string) => {
     setFlagged(f => ({ ...f, [id]: !f[id] }));
@@ -130,10 +147,12 @@ export default function Assessment() {
     setActive(null);
     setAnswers({});
     setResult(null);
+    setElapsedSeconds(0);
+    setSubmitting(false);
     setCurrentQuestion(0);
     setTimer(0);
     setConfirm(false);
-    setShowReview(false);
+    setShowReview(true);
     setMobileNav(false);
     setFlagged({});
     setNavFilter('all');
@@ -189,11 +208,14 @@ export default function Assessment() {
       };
 
       addQuiz(q);
+      startTimeRef.current = Date.now();
+      setElapsedSeconds(0);
+      setSubmitting(false);
       setActive(q);
       setAnswers({});
       setResult(null);
       setCurrentQuestion(0);
-      setShowReview(false);
+      setShowReview(true);
       setTimer(reqExam ? reqCount * 60 : 0);
       setMode(reqExam);
       setMobileNav(false);
@@ -203,7 +225,7 @@ export default function Assessment() {
       pushToast(`Quiz generated for ${reqTopic}`);
     } catch (err: any) {
       console.error('Quiz generation failed:', err);
-      const errMsg = formatApiError(err, 'Failed to generate assessment questions. Please try again.');
+      const errMsg = err?.message || 'Failed to generate quiz. Please try again.';
       setGenError(errMsg);
       pushToast(errMsg, 'error');
     } finally {
@@ -222,7 +244,7 @@ export default function Assessment() {
   };
 
   const generate = () => {
-    const selectedItem = source === 'Knowledge' ? topic : source === 'Topic' || source === 'Weak Topics' ? topic : sourceItems[0] || 'Deadlocks';
+    const selectedItem = source === 'Knowledge' ? topic : source === 'Topic' || source === 'Weak Topics' ? topic : sourceItems[0] || 'Paging';
     startQuizAsync({
       targetTopic: selectedItem,
       targetSubject: subject,
@@ -235,9 +257,19 @@ export default function Assessment() {
   };
 
   const submit = useCallback(async () => {
-    if (!active) return;
+    if (!active || result !== null || submitting) return;
+    setSubmitting(true);
+    const totalElapsed = Math.max(1, Math.round((Date.now() - startTimeRef.current) / 1000));
+    setElapsedSeconds(totalElapsed);
+    const perQuestionTime = Number((totalElapsed / Math.max(1, active.questions.length)).toFixed(1));
+
+    const correct = active.questions.filter(q => answers[q.id] === q.answer).length;
+    const score = Math.round((correct / active.questions.length) * 100);
+    updateQuiz(active.id, { score, completedAt: new Date().toISOString(), timeTakenSeconds: totalElapsed });
+    setResult(score);
     setConfirm(false);
-    setShowReview(false);
+    setShowReview(true);
+    pushToast(`Quiz submitted — ${score}%`);
 
     try {
       const submissionAnswers = active.questions.map(q => {
@@ -246,60 +278,36 @@ export default function Assessment() {
         return {
           questionId: q.id,
           selectedAnswer: selectedText,
-          timeTaken: 10,
+          timeTaken: perQuestionTime,
         };
       });
-
-      const submissionResult = await submitQuiz(active.id, submissionAnswers);
-
-      const score = Math.round(submissionResult.percentage);
-      setResult(score);
-
-      // Re-hydrate questions with backend-evaluated answers and explanations
-      if (submissionResult.questionResults && submissionResult.questionResults.length > 0) {
-        const resultMap = new Map(submissionResult.questionResults.map(r => [r.questionId, r]));
-        const updatedQuestions = active.questions.map(q => {
-          const resItem = resultMap.get(q.id);
-          if (resItem) {
-            const correctText = resItem.correctAnswer.trim().toLowerCase();
-            const correctIdx = q.options.findIndex(opt => {
-              const optClean = opt.trim().toLowerCase();
-              return (
-                optClean === correctText ||
-                (correctText.length >= 2 && optClean.startsWith(correctText.slice(0, 2))) ||
-                (optClean.length >= 2 && correctText.startsWith(optClean.slice(0, 2))) ||
-                (correctText.length > 3 && optClean.includes(correctText)) ||
-                (optClean.length > 3 && correctText.includes(optClean))
-              );
-            });
-            return {
-              ...q,
-              answer: correctIdx !== -1 ? correctIdx : 0,
-              explanation: resItem.explanation || q.explanation,
-            };
-          }
-          return q;
-        });
-
-        const updatedQuiz = { ...active, questions: updatedQuestions, score, completedAt: new Date().toISOString() };
-        setActive(updatedQuiz);
-        updateQuiz(active.id, { score, completedAt: new Date().toISOString(), questions: updatedQuestions });
-      } else {
-        updateQuiz(active.id, { score, completedAt: new Date().toISOString() });
-      }
-
-      pushToast(`Quiz submitted — ${score}%`);
-    } catch (err: any) {
-      console.warn('Backend quiz attempt submission error:', err);
-      const correct = active.questions.filter(q => q.answer >= 0 && answers[q.id] === q.answer).length;
-      const score = Math.round((correct / active.questions.length) * 100);
-      updateQuiz(active.id, { score, completedAt: new Date().toISOString() });
-      setResult(score);
-      pushToast(`Quiz submitted — ${score}%`);
+      await submitQuiz(active.id, submissionAnswers);
+    } catch (err) {
+      console.warn('Backend quiz attempt submission notice:', err);
+    } finally {
+      setSubmitting(false);
     }
 
     reloadAppData();
-  }, [active, answers, updateQuiz, pushToast, reloadAppData]);
+  }, [active, result, submitting, answers, updateQuiz, pushToast, reloadAppData]);
+
+  // Topic-wise breakdown for the active completed quiz
+  const topicBreakdown = useMemo(() => {
+    if (!active || result === null) return [];
+    const map: Record<string, { topic: string; total: number; correct: number }> = {};
+    for (const q of active.questions) {
+      const tName = q.topic || active.source || active.subject || 'Core Concept';
+      if (!map[tName]) map[tName] = { topic: tName, total: 0, correct: 0 };
+      map[tName].total += 1;
+      if (answers[q.id] === q.answer) {
+        map[tName].correct += 1;
+      }
+    }
+    return Object.values(map).map(item => ({
+      ...item,
+      accuracy: item.total > 0 ? Math.round((item.correct / item.total) * 100) : 0,
+    }));
+  }, [active, result, answers]);
 
   interface DisplayAttempt {
     id: string;
@@ -344,10 +352,13 @@ export default function Assessment() {
 
   const retry = () => {
     if (!active) return;
+    startTimeRef.current = Date.now();
+    setElapsedSeconds(0);
+    setSubmitting(false);
     setAnswers({});
     setResult(null);
     setCurrentQuestion(0);
-    setShowReview(false);
+    setShowReview(true);
     setTimer(mode ? active.questions.length * 60 : 0);
     setFlagged({});
     setNavFilter('all');
@@ -359,27 +370,38 @@ export default function Assessment() {
     setMobileNav(false);
   };
 
-  // Keyboard navigation for power users
+  // Keyboard navigation for power users (Part 9 requirement)
   useEffect(() => {
     if (!active || result !== null) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
 
       const currQ = active.questions[currentQuestion];
       if (!currQ) return;
 
       if (e.key === 'ArrowRight') {
+        e.preventDefault();
         setCurrentQuestion(i => Math.min(active.questions.length - 1, i + 1));
       } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
         setCurrentQuestion(i => Math.max(0, i - 1));
-      } else if (e.key.toLowerCase() === 'f') {
+      } else if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
         toggleFlag(currQ.id);
-      } else if (['1', '2', '3', '4'].includes(e.key)) {
+      } else if (['1', '2', '3', '4'].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const idx = parseInt(e.key, 10) - 1;
         if (idx < currQ.options.length) {
           setAnswers(a => ({ ...a, [currQ.id]: idx }));
         }
-      } else if (['a', 'b', 'c', 'd'].includes(e.key.toLowerCase())) {
+      } else if (['a', 'b', 'c', 'd'].includes(e.key.toLowerCase()) && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const idx = e.key.toLowerCase().charCodeAt(0) - 97;
         if (idx < currQ.options.length) {
           setAnswers(a => ({ ...a, [currQ.id]: idx }));
@@ -395,6 +417,8 @@ export default function Assessment() {
   const unanswered = active ? active.questions.length - answeredCount : 0;
   const flaggedCount = active ? active.questions.filter(q => flagged[q.id]).length : 0;
   const progressPercent = active && active.questions.length > 0 ? Math.round((answeredCount / active.questions.length) * 100) : 0;
+  const correctCount = active ? active.questions.filter(q => answers[q.id] === q.answer).length : 0;
+  const incorrectCount = active ? active.questions.filter(q => answers[q.id] !== undefined && answers[q.id] !== q.answer).length : 0;
 
   return (
     <div className="page-stack">
@@ -413,7 +437,7 @@ export default function Assessment() {
           </p>
         </div>
         <button className="btn secondary" onClick={() => setHistory(true)}>
-          <History size={16} /> Quiz history ({quizzes.length})
+          <History size={16} /> Quiz history ({userAttempts.length})
         </button>
       </div>
 
@@ -449,7 +473,7 @@ export default function Assessment() {
                         : s === 'Weak Topics'
                         ? weakTopics.map(w => w.topic)
                         : TOPICS;
-                    setTopic(items[0] || 'Deadlocks');
+                    setTopic(items[0] || 'Paging');
                   }
                 }}
               >
@@ -589,8 +613,8 @@ export default function Assessment() {
           {[
             'Select any course topic or uploaded document',
             'Take in untimed practice or timed exam mode',
-            'Full navigation to flag and skip questions',
-            'Instant score review with detailed explanations',
+            'Full navigation to flag and skip questions (keys 1-4, A-D, ←/→, F)',
+            'Instant score review with detailed explanations & topic accuracy',
             'Weak topics dynamically populate revision tasks',
           ].map(x => (
             <div className="feature-row" key={x}>
@@ -600,12 +624,12 @@ export default function Assessment() {
           ))}
 
           <div className="callout mt-4">
-            <b>AI Grounding Active:</b> Assessments generated from Knowledge documents are dynamically created using Azure AI Search retrieval and Microsoft Foundry (gpt-4.1-mini) strictly from your uploaded materials.
+            <b>AI Grounding Active:</b> Assessments generated from Knowledge documents are dynamically created from your retrieved document chunks with full provenance.
           </div>
         </div>
       </div>
 
-      {/* Recommended Assessments Section (Based on Real AcadAssist Data) */}
+      {/* Recommended Assessments Section */}
       <div>
         <div className="section-title-row mb-3">
           <div>
@@ -618,18 +642,8 @@ export default function Assessment() {
         </div>
 
         {weakTopics.length === 0 ? (
-          <div className="card p-6 text-center">
-            <div className="text-3xl mb-2">📝</div>
-            <h3 className="text-sm font-bold text-[var(--color-text-dark)]">No assessments available yet</h3>
-            <p className="text-xs text-[var(--color-text-muted)] max-w-sm mx-auto mt-1 mb-3">
-              Generate and complete your first practice quiz above to detect focus areas and track score progress.
-            </p>
-            <button
-              className="btn primary text-xs"
-              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-            >
-              <Target size={14} /> Start Assessment
-            </button>
+          <div className="card p-5 text-center text-xs text-[var(--color-text-muted)]">
+            No weak topics detected yet. Complete practice assessments to identify specific topics requiring focused revision.
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -766,11 +780,13 @@ export default function Assessment() {
                 </span>
               </div>
 
-              {mode && result === null && (
-                <div className={`timer-chip ${timer <= 60 ? 'warning' : ''}`}>
+              {result === null && (
+                <div className={`timer-chip ${mode && timer <= 60 ? 'warning' : ''}`}>
                   <Clock3 size={14} />
                   <span>
-                    {Math.floor(timer / 60)}:{String(timer % 60).padStart(2, '0')}
+                    {mode
+                      ? `${Math.floor(timer / 60)}:${String(timer % 60).padStart(2, '0')}`
+                      : formatDuration(elapsedSeconds)}
                   </span>
                 </div>
               )}
@@ -779,6 +795,7 @@ export default function Assessment() {
                 <button
                   className="btn subtle text-xs hidden md:inline-flex"
                   onClick={() => setConfirm(true)}
+                  disabled={submitting}
                 >
                   <CheckCircle2 size={14} className="text-emerald-600" />
                   Submit
@@ -818,7 +835,7 @@ export default function Assessment() {
                           <button
                             className={`flag-btn ${flagged[question.id] ? 'flagged' : ''}`}
                             onClick={() => toggleFlag(question.id)}
-                            title="Flag for later review"
+                            title="Flag or unflag question (Shortcut: F)"
                           >
                             <Bookmark size={13} fill={flagged[question.id] ? 'currentColor' : 'none'} />
                             <span>{flagged[question.id] ? 'Flagged' : 'Flag'}</span>
@@ -835,6 +852,7 @@ export default function Assessment() {
                       {question?.options.map((optionText, j) => {
                         const isSelected = answers[question.id] === j;
                         const letter = String.fromCharCode(65 + j);
+                        const cleanedOption = optionText.replace(/^[A-Da-d][).:\-]\s*/, '');
                         return (
                           <button
                             key={`${question.id}-${j}`}
@@ -844,7 +862,7 @@ export default function Assessment() {
                             aria-checked={isSelected}
                           >
                             <div className="option-letter">{letter}</div>
-                            <div className="option-label">{optionText}</div>
+                            <div className="option-label">{cleanedOption}</div>
                             <div className="option-check">
                               {isSelected && <Check size={13} strokeWidth={3} />}
                             </div>
@@ -891,7 +909,7 @@ export default function Assessment() {
                           Next <ArrowRight size={14} />
                         </button>
                       ) : (
-                        <button className="btn primary" onClick={() => setConfirm(true)}>
+                        <button className="btn primary" onClick={() => setConfirm(true)} disabled={submitting}>
                           <CheckCircle2 size={15} /> Review & Submit
                         </button>
                       )}
@@ -1014,7 +1032,7 @@ export default function Assessment() {
                       ? `${unanswered} question${unanswered > 1 ? 's' : ''} still unanswered.`
                       : 'All questions completed!'}
                   </p>
-                  <button className="btn primary w-full text-xs" onClick={() => setConfirm(true)}>
+                  <button className="btn primary w-full text-xs" onClick={() => setConfirm(true)} disabled={submitting}>
                     <CheckCircle2 size={14} /> Submit Quiz
                   </button>
                 </div>
@@ -1039,7 +1057,7 @@ export default function Assessment() {
                     }`}
                   >
                     <span className="text-3xl font-black">{result}%</span>
-                    <span className="text-[0.65rem] font-bold uppercase tracking-wider mt-0.5">Score</span>
+                    <span className="text-[0.65rem] font-bold uppercase tracking-wider mt-0.5">Accuracy</span>
                   </div>
 
                   <div className="eyebrow">ASSESSMENT COMPLETED</div>
@@ -1051,21 +1069,21 @@ export default function Assessment() {
                       : 'Targeted Review Recommended 🎯'}
                   </h2>
                   <p className="text-xs text-[var(--color-text-muted)] max-w-lg mx-auto mt-2 leading-relaxed">
-                    You answered <b>{active.questions.filter(q => answers[q.id] === q.answer).length}</b> of{' '}
-                    <b>{active.questions.length}</b> questions correctly.
-                    {result < 70 && ' We have marked key concepts in your study planner to reinforce your understanding.'}
+                    You scored <b>{correctCount} / {active.questions.length}</b> ({result}% accuracy) in{' '}
+                    <b>{formatDuration(elapsedSeconds)}</b>.
+                    {result < 70 && ' Key concepts have been flagged in your diagnostics for targeted revision.'}
                   </p>
 
                   <div className="result-metric-grid mt-6">
                     <div className="result-metric-card">
                       <b className="text-emerald-600 dark:text-emerald-400">
-                        {active.questions.filter(q => answers[q.id] === q.answer).length}
+                        {correctCount}
                       </b>
                       <span>Correct</span>
                     </div>
                     <div className="result-metric-card">
                       <b className="text-rose-600 dark:text-rose-400">
-                        {active.questions.filter(q => answers[q.id] !== undefined && answers[q.id] !== q.answer).length}
+                        {incorrectCount}
                       </b>
                       <span>Incorrect</span>
                     </div>
@@ -1073,15 +1091,34 @@ export default function Assessment() {
                       <b className="text-amber-600 dark:text-amber-400">
                         {unanswered}
                       </b>
-                      <span>Skipped</span>
+                      <span>Unanswered</span>
                     </div>
                     <div className="result-metric-card">
                       <b className="text-[var(--color-text-dark)]">
-                        {active.questions.length}
+                        {formatDuration(elapsedSeconds)}
                       </b>
-                      <span>Total Questions</span>
+                      <span>Time Taken</span>
                     </div>
                   </div>
+
+                  {/* Topic-wise Performance Breakdown */}
+                  {topicBreakdown.length > 0 && (
+                    <div className="mt-5 pt-4 border-t border-[var(--color-border-light)] text-left">
+                      <div className="text-xs font-bold text-[var(--color-text-dark)] mb-2">
+                        Topic-Wise Performance
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {topicBreakdown.map(tb => (
+                          <div key={tb.topic} className="p-2.5 rounded-xl bg-[var(--color-page-bg)] border border-[var(--color-card-border)] flex items-center justify-between text-xs">
+                            <span className="font-semibold truncate pr-2">{tb.topic}</span>
+                            <span className={`font-bold ${tb.accuracy >= 75 ? 'text-emerald-600' : tb.accuracy >= 60 ? 'text-amber-600' : 'text-rose-600'}`}>
+                              {tb.correct}/{tb.total} ({tb.accuracy}%)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
                     <button className="btn secondary text-xs" onClick={retry}>
@@ -1164,14 +1201,14 @@ export default function Assessment() {
                                       : 'incorrect'
                                   }`}
                                 >
-                                  {isCorrect ? '✓ Correct' : isUnanswered ? 'Skipped' : '✗ Incorrect'}
+                                  {isCorrect ? '✓ Correct' : isUnanswered ? 'Unanswered' : '✗ Incorrect'}
                                 </span>
                               </div>
 
                               <div className="solution-answers-box">
                                 <div className="flex items-start gap-2">
-                                  <span className="text-[var(--color-text-muted)] font-semibold w-24 flex-none">
-                                    Your Choice:
+                                  <span className="text-[var(--color-text-muted)] font-semibold w-28 flex-none">
+                                    Your Answer:
                                   </span>
                                   <span
                                     className={`font-semibold ${
@@ -1184,19 +1221,17 @@ export default function Assessment() {
                                   >
                                     {isUnanswered
                                       ? 'Not answered'
-                                      : `${String.fromCharCode(65 + answers[q.id])}. ${q.options[answers[q.id]]}`}
+                                      : `${String.fromCharCode(65 + answers[q.id])}. ${q.options[answers[q.id]]?.replace(/^[A-Da-d][).:\-]\s*/, '')}`}
                                   </span>
                                 </div>
-                                {!isCorrect && (
-                                  <div className="flex items-start gap-2">
-                                    <span className="text-[var(--color-text-muted)] font-semibold w-24 flex-none">
-                                      Correct Answer:
-                                    </span>
-                                    <span className="font-bold text-emerald-700 dark:text-emerald-400">
-                                      {String.fromCharCode(65 + q.answer)}. {q.options[q.answer]}
-                                    </span>
-                                  </div>
-                                )}
+                                <div className="flex items-start gap-2">
+                                  <span className="text-[var(--color-text-muted)] font-semibold w-28 flex-none">
+                                    Correct Answer:
+                                  </span>
+                                  <span className="font-bold text-emerald-700 dark:text-emerald-400">
+                                    {String.fromCharCode(65 + q.answer)}. {q.options[q.answer]?.replace(/^[A-Da-d][).:\-]\s*/, '')}
+                                  </span>
+                                </div>
                               </div>
 
                               {q.explanation && (
@@ -1244,7 +1279,7 @@ export default function Assessment() {
                       Submit Assessment?
                     </h3>
                     <p className="text-xs text-[var(--color-text-muted)] mt-1 mb-0 leading-relaxed">
-                      You have answered <b>{answeredCount}</b> of <b>{active.questions.length}</b> questions. Once submitted, your score will be calculated and saved.
+                      You have answered <b>{answeredCount}</b> of <b>{active.questions.length}</b> questions ({unanswered} unanswered, {flaggedCount} flagged). Once submitted, your score will be calculated and saved.
                     </p>
                   </div>
                 </div>
@@ -1265,17 +1300,19 @@ export default function Assessment() {
                   <button
                     className="btn secondary text-xs"
                     onClick={() => setConfirm(false)}
+                    disabled={submitting}
                   >
                     Keep Working
                   </button>
                   <button
                     className="btn primary text-xs"
+                    disabled={submitting}
                     onClick={() => {
                       setConfirm(false);
                       submit();
                     }}
                   >
-                    <CheckCircle2 size={14} /> Submit Assessment
+                    <CheckCircle2 size={14} /> {submitting ? 'Submitting…' : 'Submit Assessment'}
                   </button>
                 </div>
               </div>
@@ -1287,64 +1324,32 @@ export default function Assessment() {
       {/* Quiz History Modal */}
       <Modal open={history} onClose={() => setHistory(false)} title="Quiz History" wide>
         <div>
-          {quizzes.length ? (
-            quizzes.map(q => (
-              <div className="history-row" key={q.id}>
+          {userAttempts.length ? (
+            userAttempts.map(att => (
+              <div className="history-row" key={att.id}>
                 <div>
-                  <b>{q.title}</b>
+                  <b>{att.topic}</b>
                   <small>
-                    {q.subject} · {q.difficulty} · {q.questions.length} questions ·{' '}
-                    {q.completedAt ? new Date(q.completedAt).toLocaleDateString() : 'Draft'}
+                    {att.subject} · Score: {att.scoreFraction} · {att.date}
                   </small>
                 </div>
-                <span className="font-extrabold text-sm">{q.score === undefined ? 'Not attempted' : `${q.score}%`}</span>
+                <span className="font-extrabold text-sm">{att.percentage}</span>
                 <button
                   className="btn subtle text-xs"
                   onClick={() => {
-                    setActive(q);
-                    setAnswers({});
-                    setResult(null);
-                    setCurrentQuestion(0);
-                    setShowReview(false);
-                    setTimer(0);
                     setHistory(false);
+                    startQuizFromTopic(att.topic.split(' ')[0], att.subject, false);
                   }}
                 >
-                  Retake
+                  Retry
                 </button>
               </div>
             ))
           ) : (
             <div className="empty-inline">
-              No assessments generated yet. Select a topic above to create your first quiz.
+              No assessments completed yet. Select a topic above to create your first quiz.
             </div>
           )}
-        </div>
-      </Modal>
-
-      {/* Submit Confirmation Modal */}
-      <Modal open={confirm} onClose={() => setConfirm(false)} title="Submit assessment" subtitle="You cannot change answers after submitting.">
-        <div className="flex items-start gap-3">
-          <AlertCircle size={20} className="text-amber-600" />
-          <p className="text-sm">
-            You have answered <b>{answeredCount}</b> of {active?.questions.length || 0} questions.{' '}
-            {unanswered > 0 ? (
-              <>
-                <b>{unanswered}</b> question{unanswered > 1 ? 's are' : ' is'} unanswered and will count as incorrect.
-              </>
-            ) : (
-              <>All questions are answered.</>
-            )}{' '}
-            Submit now?
-          </p>
-        </div>
-        <div className="modal-actions">
-          <button className="btn secondary" onClick={() => setConfirm(false)}>
-            Keep working
-          </button>
-          <button className="btn primary" onClick={submit}>
-            Submit now
-          </button>
         </div>
       </Modal>
     </div>

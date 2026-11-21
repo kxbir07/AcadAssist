@@ -180,7 +180,6 @@ export interface ChatMessage {
     title?: string;
     filename?: string;
     page_number?: number;
-    slide_number?: number;
     score?: number;
     content_snippet?: string;
     citation?: string;
@@ -313,7 +312,7 @@ export const SUBJECTS: Subject[] = [
     tag: 'PY',
     code: 'CS-101',
     semester: 'Semester 1',
-    examDate: new Date(Date.now() + 38 * 86400000).toISOString().split('T')[0],
+    examDate: '2026-11-02',
     importance: 'Low',
   },
 ];
@@ -473,17 +472,12 @@ export const ACTIVITY_DISTRIBUTION = [
   { name: 'AI Assistance', value: 15, color: '#6a4c93' },
 ];
 
-const _calcRelDateStr = (daysAgo: number) => {
-  const d = new Date(Date.now() - daysAgo * 86400000);
-  return d.toLocaleDateString('en-US', { day: '2-digit', month: 'short' });
-};
-
 export const PROGRESS_OVER_TIME = [
-  { date: _calcRelDateStr(28), progress: 30 },
-  { date: _calcRelDateStr(21), progress: 42 },
-  { date: _calcRelDateStr(14), progress: 54 },
-  { date: _calcRelDateStr(7), progress: 61 },
-  { date: _calcRelDateStr(0), progress: 64 },
+  { date: '25 Aug', progress: 30 },
+  { date: '01 Sep', progress: 42 },
+  { date: '08 Sep', progress: 54 },
+  { date: '15 Sep', progress: 61 },
+  { date: '22 Sep', progress: 64 },
 ];
 
 export const SUBJECT_PROGRESS = [

@@ -4,23 +4,26 @@ Tests:
 1. Registration (email uniqueness, password hashing with bcrypt, token generation)
 2. Login (success, invalid password, non-existent user)
 3. Current user identity (/api/auth/me)
-4. Unauthenticated access rejection on protected endpoints
-5. Centralized document access control:
+4. Profile editing, password change, and secure single-use password reset token flow
+5. Unauthenticated access rejection on protected endpoints
+6. Centralized document access control:
    - Private document accessible to owner
    - Private document denied (403/404) to other users
    - Public document accessible to all authenticated users
    - Unauthenticated download denied
    - Document SHA-256 checksum deduplication
-6. Multi-user RAG isolation:
+7. Multi-user RAG isolation:
    - User A cannot retrieve User B's private chunks
    - User B can retrieve User A's public chunks
-7. Multi-user academic data isolation:
+8. Multi-user academic data isolation:
    - User A and User B study plans and tasks isolation
    - Notes isolation
    - Chat isolation
+   - Quiz attempts, quiz ownership, and upcoming exams isolation
 """
 
 import io
+from datetime import datetime, timedelta, timezone
 import pytest
 from app.core.security import verify_password
 from app.models.document import Document
@@ -101,6 +104,91 @@ def test_auth_login_and_me_lifecycle(client):
     # 5. Unauthenticated /api/auth/me -> 401
     unauth_resp = client.get("/api/auth/me")
     assert unauth_resp.status_code == 401
+
+
+def test_auth_profile_update_password_change_and_reset(client):
+    """Test profile editing, password change, and secure single-use password reset flow."""
+    reg_resp = client.post(
+        "/api/auth/register",
+        json={
+            "email": "student_profile@acadassist.edu",
+            "name": "Initial Name",
+            "password": "InitialPassword123!",
+        },
+    )
+    assert reg_resp.status_code == 201
+    token = reg_resp.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. Update profile via PATCH /api/auth/profile
+    patch_resp = client.patch(
+        "/api/auth/profile",
+        json={
+            "name": "Updated Scholar Name",
+            "academic_level": "Postgraduate",
+            "field_of_study": "Artificial Intelligence",
+            "bio": "Researching grounded RAG systems.",
+        },
+        headers=headers,
+    )
+    assert patch_resp.status_code == 200
+    profile_data = patch_resp.json()
+    assert profile_data["name"] == "Updated Scholar Name"
+    assert profile_data["academic_level"] == "Postgraduate"
+    assert profile_data["field_of_study"] == "Artificial Intelligence"
+    assert profile_data["bio"] == "Researching grounded RAG systems."
+
+    # 2. Change password with wrong current password -> 400
+    bad_pw_resp = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "WrongCurrentPassword!", "new_password": "NewPassword456!"},
+        headers=headers,
+    )
+    assert bad_pw_resp.status_code == 400
+
+    # 3. Change password with valid current password -> 200
+    ok_pw_resp = client.post(
+        "/api/auth/change-password",
+        json={"current_password": "InitialPassword123!", "new_password": "NewPassword456!"},
+        headers=headers,
+    )
+    assert ok_pw_resp.status_code == 200
+
+    # Verify login with new password succeeds
+    login_new = client.post(
+        "/api/auth/login",
+        json={"email": "student_profile@acadassist.edu", "password": "NewPassword456!"},
+    )
+    assert login_new.status_code == 200
+
+    # 4. Forgot password & single-use reset token flow
+    forgot_resp = client.post(
+        "/api/auth/forgot-password",
+        json={"email": "student_profile@acadassist.edu"},
+    )
+    assert forgot_resp.status_code == 200
+    reset_token = forgot_resp.json().get("reset_token")
+    assert reset_token is not None
+
+    reset_resp = client.post(
+        "/api/auth/reset-password",
+        json={"token": reset_token, "new_password": "RecoveredPassword789!"},
+    )
+    assert reset_resp.status_code == 200
+
+    # Reusing the exact same reset token a second time must be rejected (400)
+    reuse_resp = client.post(
+        "/api/auth/reset-password",
+        json={"token": reset_token, "new_password": "AnotherPassword000!"},
+    )
+    assert reuse_resp.status_code == 400
+
+    # Login with recovered password succeeds
+    login_recovered = client.post(
+        "/api/auth/login",
+        json={"email": "student_profile@acadassist.edu", "password": "RecoveredPassword789!"},
+    )
+    assert login_recovered.status_code == 200
 
 
 # ==============================================================================
@@ -238,7 +326,6 @@ def test_notes_and_chat_user_isolation(client, sample_academic_entities, auth_he
     assert bob_notes_resp.status_code == 200
     assert not any(n["id"] == alice_note_id for n in bob_notes_resp.json())
 
-
     # 3. Bob attempts to modify Alice's note -> 404 Not Found (or 403)
     resp_bob_patch = client.patch(
         f"/api/notes/{alice_note_id}",
@@ -272,30 +359,88 @@ def test_notes_and_chat_user_isolation(client, sample_academic_entities, auth_he
 
 
 def test_quiz_attempts_and_upcoming_exams_user_isolation(client, sample_academic_entities, auth_headers):
-    """Verify quiz attempts and upcoming exams are properly scoped to user."""
+    """Verify quiz attempts, quiz ownership, and upcoming exams are strictly isolated per user."""
     entities = sample_academic_entities
     alice_id = entities["user_a"].user_id
     bob_id = entities["user_b"].user_id
     alice_headers = auth_headers(alice_id)
     bob_headers = auth_headers(bob_id)
 
-    # Alice has empty attempts initially
-    resp_attempts = client.get("/api/quizzes/attempts", headers=alice_headers)
-    assert resp_attempts.status_code == 200
-    assert resp_attempts.json() == []
+    # 1. Both users have empty quiz attempts initially
+    resp_attempts_alice = client.get("/api/quizzes/attempts", headers=alice_headers)
+    assert resp_attempts_alice.status_code == 200
+    assert resp_attempts_alice.json() == []
 
-    # Alice has empty upcoming exams initially
+    resp_attempts_bob = client.get("/api/quizzes/attempts", headers=bob_headers)
+    assert resp_attempts_bob.status_code == 200
+    assert resp_attempts_bob.json() == []
+
+    # 2. Alice generates a quiz and submits it; verify Bob cannot access or submit Alice's quiz
+    resp_create_quiz = client.post(
+        "/api/quizzes",
+        json={
+            "subject_id": "operating_systems",
+            "topic_ids": ["Paging"],
+            "difficulty": "medium",
+            "count": 3,
+            "title": "Alice Paging Quiz",
+        },
+        headers=alice_headers,
+    )
+    assert resp_create_quiz.status_code == 201
+    quiz_data = resp_create_quiz.json()
+    alice_quiz_id = quiz_data["quiz_id"]
+    questions = quiz_data["questions"]
+
+    # Bob cannot fetch Alice's quiz -> 403 Forbidden
+    resp_bob_get_quiz = client.get(f"/api/quizzes/{alice_quiz_id}", headers=bob_headers)
+    assert resp_bob_get_quiz.status_code == 403
+
+    # Bob cannot submit Alice's quiz -> 403 Forbidden
+    submit_payload = {
+        "answers": [
+            {"question_id": q["question_id"], "selected_answer": q["options"][0], "time_taken": 10.0}
+            for q in questions
+        ]
+    }
+    resp_bob_submit_quiz = client.post(
+        f"/api/quizzes/{alice_quiz_id}/submit",
+        json=submit_payload,
+        headers=bob_headers,
+    )
+    assert resp_bob_submit_quiz.status_code == 403
+
+    # Alice submits her own quiz -> 200 OK
+    resp_alice_submit = client.post(
+        f"/api/quizzes/{alice_quiz_id}/submit",
+        json=submit_payload,
+        headers=alice_headers,
+    )
+    assert resp_alice_submit.status_code == 200
+
+    # Alice sees her completed attempt in /api/quizzes/attempts
+    resp_alice_attempts_after = client.get("/api/quizzes/attempts", headers=alice_headers)
+    assert resp_alice_attempts_after.status_code == 200
+    assert len(resp_alice_attempts_after.json()) == 1
+    assert resp_alice_attempts_after.json()[0]["quiz_id"] == alice_quiz_id
+
+    # Bob still sees 0 attempts (cannot see Alice's quiz attempts)
+    resp_bob_attempts_after = client.get("/api/quizzes/attempts", headers=bob_headers)
+    assert resp_bob_attempts_after.status_code == 200
+    assert resp_bob_attempts_after.json() == []
+
+    # 3. Upcoming exams isolation
     resp_exams = client.get("/api/exams/upcoming", headers=alice_headers)
     assert resp_exams.status_code == 200
     assert resp_exams.json() == []
 
-    # Alice schedules an exam
+    future_exam_date = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
     resp_create_exam = client.post(
         "/api/exams",
         json={
             "subject_id": entities["subject_os"].subject_id,
             "title": "Alice Operating Systems Midterm",
-            "exam_date": "2026-10-15T09:00:00",
+            "exam_date": future_exam_date,
         },
         headers=alice_headers,
     )
@@ -307,9 +452,11 @@ def test_quiz_attempts_and_upcoming_exams_user_isolation(client, sample_academic
     assert len(resp_alice_exams.json()) == 1
     assert resp_alice_exams.json()[0]["title"] == "Alice Operating Systems Midterm"
 
-    # Bob does NOT see Alice's exam
+    # Bob does NOT see Alice's exam in /api/exams/upcoming or /api/exams
     resp_bob_exams = client.get("/api/exams/upcoming", headers=bob_headers)
     assert resp_bob_exams.status_code == 200
     assert resp_bob_exams.json() == []
 
-
+    resp_bob_all_exams = client.get("/api/exams", headers=bob_headers)
+    assert resp_bob_all_exams.status_code == 200
+    assert resp_bob_all_exams.json() == []

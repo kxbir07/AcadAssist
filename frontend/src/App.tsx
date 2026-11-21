@@ -9,6 +9,9 @@ import Signup from './pages/Signup';
 import Dashboard from './pages/Dashboard';
 import Knowledge from './pages/Knowledge';
 import Courses from './pages/Courses';
+import CourseDetail from './pages/CourseDetail';
+import CourseQuiz from './pages/CourseQuiz';
+import LessonPage from './pages/LessonPage';
 import Assessment from './pages/Assessment';
 import Planner from './pages/Planner';
 import Assistant from './pages/Assistant';
@@ -31,6 +34,10 @@ export default function App() {
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/knowledge" element={<Knowledge />} />
                 <Route path="/courses" element={<Courses />} />
+                <Route path="/courses/:courseId" element={<CourseDetail />} />
+                <Route path="/courses/:courseId/lessons/:lessonId" element={<LessonPage />} />
+                <Route path="/courses/:courseId/quiz" element={<CourseQuiz />} />
+                <Route path="/courses/:courseId/modules/:moduleId/quiz" element={<CourseQuiz />} />
                 <Route path="/assessment" element={<Assessment />} />
                 <Route path="/planner" element={<Planner />} />
                 <Route path="/assistant" element={<Assistant />} />

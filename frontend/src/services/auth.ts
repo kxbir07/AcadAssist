@@ -1,10 +1,16 @@
 /**
- * Real Backend Authentication Service for AcadAssist.
+ * Real Backend Authentication & User Management Service for AcadAssist.
  * Connects directly to FastAPI endpoints:
- * - POST /api/auth/register
- * - POST /api/auth/login
- * - GET  /api/auth/me
- * - POST /api/auth/logout
+ * - POST  /api/auth/register
+ * - POST  /api/auth/login
+ * - GET   /api/auth/me
+ * - PATCH /api/auth/profile
+ * - POST  /api/auth/change-password
+ * - POST  /api/auth/forgot-password
+ * - POST  /api/auth/reset-password
+ * - GET   /api/auth/workspace-state
+ * - PUT   /api/auth/workspace-state
+ * - POST  /api/auth/logout
  */
 
 export interface LocalAccount {
@@ -22,6 +28,12 @@ const TOKEN_KEY = 'acadassist.auth.token';
 const USER_KEY = 'acadassist.auth.user';
 
 const API_BASE = import.meta.env.VITE_API_URL?.replace(/\/$/, '') || '';
+
+function emitAuthChanged() {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('acadassist:auth-changed'));
+  }
+}
 
 export function getToken(): string | null {
   try {
@@ -59,6 +71,7 @@ export function setCachedUser(user: LocalAccount | null) {
     } else {
       localStorage.removeItem(USER_KEY);
     }
+    emitAuthChanged();
   } catch {
     /* storage is optional */
   }
@@ -87,6 +100,19 @@ interface AuthResponse {
   };
 }
 
+function mapUserPayload(u: AuthResponse['user']): LocalAccount {
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    role: u.role,
+    academicLevel: u.academic_level,
+    fieldOfStudy: u.field_of_study,
+    bio: u.bio,
+    createdAt: u.created_at,
+  };
+}
+
 export async function login(email: string, password: string): Promise<LocalAccount> {
   const url = API_BASE ? `${API_BASE}/api/auth/login` : '/api/auth/login';
   const res = await fetch(url, {
@@ -99,7 +125,7 @@ export async function login(email: string, password: string): Promise<LocalAccou
     let errorDetail = 'Incorrect email or password.';
     try {
       const err = await res.json();
-      if (err.detail) errorDetail = err.detail;
+      if (err.detail) errorDetail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
     } catch {
       /* ignore */
     }
@@ -108,17 +134,7 @@ export async function login(email: string, password: string): Promise<LocalAccou
 
   const data = (await res.json()) as AuthResponse;
   setToken(data.access_token);
-
-  const account: LocalAccount = {
-    id: data.user.id,
-    name: data.user.name,
-    email: data.user.email,
-    role: data.user.role,
-    academicLevel: data.user.academic_level,
-    fieldOfStudy: data.user.field_of_study,
-    bio: data.user.bio,
-    createdAt: data.user.created_at,
-  };
+  const account = mapUserPayload(data.user);
   setCachedUser(account);
   return account;
 }
@@ -140,7 +156,7 @@ export async function createAccount(name: string, email: string, password: strin
     let errorDetail = 'Unable to register account.';
     try {
       const err = await res.json();
-      if (err.detail) errorDetail = err.detail;
+      if (err.detail) errorDetail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
     } catch {
       /* ignore */
     }
@@ -149,17 +165,7 @@ export async function createAccount(name: string, email: string, password: strin
 
   const data = (await res.json()) as AuthResponse;
   setToken(data.access_token);
-
-  const account: LocalAccount = {
-    id: data.user.id,
-    name: data.user.name,
-    email: data.user.email,
-    role: data.user.role,
-    academicLevel: data.user.academic_level,
-    fieldOfStudy: data.user.field_of_study,
-    bio: data.user.bio,
-    createdAt: data.user.created_at,
-  };
+  const account = mapUserPayload(data.user);
   setCachedUser(account);
   return account;
 }
@@ -175,25 +181,199 @@ export async function getCurrentUser(): Promise<LocalAccount | null> {
     });
     if (!res.ok) {
       if (res.status === 401) {
-        logout();
+        await logout();
       }
       return null;
     }
     const data = await res.json();
-    const account: LocalAccount = {
-      id: data.id,
-      name: data.name,
-      email: data.email,
-      role: data.role,
-      academicLevel: data.academic_level,
-      fieldOfStudy: data.field_of_study,
-      bio: data.bio,
-      createdAt: data.created_at,
-    };
+    const account = mapUserPayload(data);
     setCachedUser(account);
     return account;
   } catch {
     return getCachedUser();
+  }
+}
+
+export async function updateProfile(patch: {
+  name?: string;
+  email?: string;
+  role?: string;
+  academicLevel?: string;
+  fieldOfStudy?: string;
+  bio?: string;
+}): Promise<LocalAccount | null> {
+  const token = getToken();
+  if (!token) return null;
+
+  const url = API_BASE ? `${API_BASE}/api/auth/profile` : '/api/auth/profile';
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      name: patch.name,
+      email: patch.email,
+      role: patch.role,
+      academic_level: patch.academicLevel,
+      field_of_study: patch.fieldOfStudy,
+      bio: patch.bio,
+    }),
+  });
+
+  if (!res.ok) {
+    let errorDetail = 'Failed to update profile.';
+    try {
+      const err = await res.json();
+      if (err.detail) errorDetail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(errorDetail);
+  }
+
+  const data = await res.json();
+  const updated = mapUserPayload(data);
+  setCachedUser(updated);
+  return updated;
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<string> {
+  const token = getToken();
+  if (!token) throw new Error('You must be signed in to change your password.');
+
+  const url = API_BASE ? `${API_BASE}/api/auth/change-password` : '/api/auth/change-password';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+
+  if (!res.ok) {
+    let errorDetail = 'Unable to change password.';
+    try {
+      const err = await res.json();
+      if (err.detail) errorDetail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(errorDetail);
+  }
+
+  const data = await res.json();
+  return data.message || 'Password changed successfully.';
+}
+
+export async function requestPasswordReset(email: string): Promise<{
+  message: string;
+  resetToken?: string;
+  expiresInMinutes: number;
+}> {
+  const url = API_BASE ? `${API_BASE}/api/auth/forgot-password` : '/api/auth/forgot-password';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: email.trim().toLowerCase() }),
+  });
+
+  if (!res.ok) {
+    let errorDetail = 'Unable to initiate password recovery.';
+    try {
+      const err = await res.json();
+      if (err.detail) errorDetail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(errorDetail);
+  }
+
+  const data = await res.json();
+  return {
+    message: data.message || 'Password reset token generated.',
+    resetToken: data.reset_token,
+    expiresInMinutes: data.expires_in_minutes || 15,
+  };
+}
+
+export async function confirmPasswordReset(token: string, newPassword: string): Promise<string> {
+  const url = API_BASE ? `${API_BASE}/api/auth/reset-password` : '/api/auth/reset-password';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: token.trim(),
+      new_password: newPassword,
+    }),
+  });
+
+  if (!res.ok) {
+    let errorDetail = 'Unable to reset password.';
+    try {
+      const err = await res.json();
+      if (err.detail) errorDetail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(errorDetail);
+  }
+
+  const data = await res.json();
+  return data.message || 'Password reset successfully.';
+}
+
+export async function fetchWorkspaceState(): Promise<{
+  enrolled_courses: string[] | null;
+  course_progress: Record<string, any>;
+  course_preferences: string[];
+  events: any[];
+  study_goals: any[];
+  profile_extra: Record<string, any>;
+} | null> {
+  const token = getToken();
+  if (!token) return null;
+
+  const url = API_BASE ? `${API_BASE}/api/auth/workspace-state` : '/api/auth/workspace-state';
+  try {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function persistWorkspaceState(payload: {
+  enrolled_courses?: string[];
+  course_progress?: Record<string, any>;
+  course_preferences?: string[];
+  events?: any[];
+  study_goals?: any[];
+  profile_extra?: Record<string, any>;
+}): Promise<void> {
+  const token = getToken();
+  if (!token) return;
+
+  const url = API_BASE ? `${API_BASE}/api/auth/workspace-state` : '/api/auth/workspace-state';
+  try {
+    await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    /* offline fallback stays in localStorage */
   }
 }
 

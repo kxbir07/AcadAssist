@@ -45,3 +45,78 @@ def test_agent_chat_execution():
         assert len(response.sources) > 0
         assert response.sources[0].filename == "os_concepts_ch8_paging.pdf"
     assert response.execution_mode in ("cloud_foundry", "local_orchestrator")
+
+
+def test_regression_explain_paging_with_simple_example():
+    """Verify 'Explain paging with a simple example.' triggers knowledge retrieval, not study plan or exam intent."""
+    service = AcadAssistAgentService()
+    uid = "00000000-0000-0000-0000-000000000001"
+    response = service.chat(user_id=uid, message="Explain paging with a simple example.")
+
+    assert isinstance(response, ChatResponse)
+    assert "study plan for today" not in response.message.lower()
+    assert "paging" in response.message.lower()
+    if response.execution_mode == "local_orchestrator":
+        assert len(response.sources) > 0
+        assert response.sources[0].filename == "os_concepts_ch8_paging.pdf"
+
+
+def test_regression_explain_concept_of_paging():
+    """Verify 'Explain the concept of paging.' triggers knowledge retrieval and grounds in course material."""
+    service = AcadAssistAgentService()
+    uid = "00000000-0000-0000-0000-000000000001"
+    response = service.chat(user_id=uid, message="Explain the concept of paging.")
+
+    assert isinstance(response, ChatResponse)
+    assert "study plan for today" not in response.message.lower()
+    assert "paging" in response.message.lower()
+    if response.execution_mode == "local_orchestrator":
+        assert len(response.sources) > 0
+
+
+def test_regression_what_is_todays_date():
+    """Verify 'What is today's date?' triggers date query intent, not study plan."""
+    service = AcadAssistAgentService()
+    uid = "00000000-0000-0000-0000-000000000001"
+    response = service.chat(user_id=uid, message="What is today's date?")
+
+    assert isinstance(response, ChatResponse)
+    assert "today's date is" in response.message.lower()
+    assert "study plan for today" not in response.message.lower()
+
+
+def test_regression_today_date_short():
+    """Verify 'today date' triggers date query intent, not study plan."""
+    service = AcadAssistAgentService()
+    uid = "00000000-0000-0000-0000-000000000001"
+    response = service.chat(user_id=uid, message="today date")
+
+    assert isinstance(response, ChatResponse)
+    assert "today's date is" in response.message.lower()
+    assert "study plan for today" not in response.message.lower()
+
+
+def test_regression_create_my_study_plan_for_today():
+    """Verify 'Create my study plan for today.' triggers study plan intent."""
+    service = AcadAssistAgentService()
+    uid = "00000000-0000-0000-0000-000000000001"
+    response = service.chat(user_id=uid, message="Create my study plan for today.")
+
+    assert isinstance(response, ChatResponse)
+    assert "study plan for today" in response.message.lower()
+    if response.execution_mode == "local_orchestrator":
+        assert any(act.type == "study_plan_retrieved" for act in response.actions)
+
+
+def test_regression_show_my_upcoming_exams():
+    """Verify 'Show my upcoming exams.' triggers upcoming exams intent, not study plan."""
+    service = AcadAssistAgentService()
+    uid = "00000000-0000-0000-0000-000000000001"
+    response = service.chat(user_id=uid, message="Show my upcoming exams.")
+
+    assert isinstance(response, ChatResponse)
+    assert "upcoming examinations" in response.message.lower()
+    assert "study plan for today" not in response.message.lower()
+    if response.execution_mode == "local_orchestrator":
+        assert any(act.type == "get_upcoming_exams" for act in response.actions)
+

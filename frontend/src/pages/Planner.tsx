@@ -3,10 +3,11 @@ import {
   Check, Clock3, Plus, Sparkles, Trash2, Pencil, CalendarDays,
   Target
 } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import HeroHeader from '../components/ui/HeroHeader';
 import Modal from '../components/ui/Modal';
 import { useApp, type CalendarEvent } from '../context/AppContext';
+import { createStudyPlan } from '../services/api';
 
 const TYPES: CalendarEvent['type'][] = ['Task', 'Exam', 'Class', 'Assignment', 'Study Session', 'Personal Event'];
 const iso = (d: Date) =>
@@ -25,19 +26,32 @@ const monthDays = (year: number, month: number) => {
 export default function Planner() {
   const {
     plannerTasks, togglePlannerTask, events, addEvent, updateEvent, deleteEvent,
-    pushToast, settings, weakTopics, upcomingExams
+    pushToast, settings, weakTopics, upcomingExams, reloadAppData
   } = useApp();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const today = new Date();
+  const paramDate = searchParams.get('date');
   const [cursor, setCursor] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [view, setView] = useState<'Day' | 'Week' | 'Month'>('Month');
-  const [selectedDate, setSelectedDate] = useState(iso(today));
+  const [selectedDate, setSelectedDate] = useState(paramDate || iso(today));
 
   const [taskOpen, setTaskOpen] = useState(false);
   const [editEvent, setEditEvent] = useState<CalendarEvent | null>(null);
   const [focusOpen, setFocusOpen] = useState(false);
   const [focusSeconds, setFocusSeconds] = useState(0);
+
+  // Study Plan Generator Modal state
+  const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [planStartDate, setPlanStartDate] = useState(iso(today));
+  const [planEndDate, setPlanEndDate] = useState(() => {
+    const end = new Date(today);
+    end.setDate(today.getDate() + 6);
+    return iso(end);
+  });
+  const [planMinutes, setPlanMinutes] = useState(120);
+  const [planBusy, setPlanBusy] = useState(false);
 
   const [title, setTitle] = useState('');
   const [time, setTime] = useState('5:00 PM');
@@ -84,12 +98,12 @@ export default function Planner() {
     return events.filter(e => week.has(e.date));
   }, [view, events, year, cursor, selectedDate]);
 
-  const openAdd = (date = selectedDate) => {
+  const openAdd = (date = selectedDate, presetType: CalendarEvent['type'] = 'Task') => {
     setSelectedDate(date);
     setEditEvent(null);
     setTitle('');
     setTime('5:00 PM');
-    setType('Task');
+    setType(presetType);
     setSubject('');
     setNotes('');
     setTaskOpen(true);
@@ -127,6 +141,64 @@ export default function Planner() {
       pushToast('Added to planner');
     }
     setTaskOpen(false);
+  };
+
+  const handleGenerateStudyPlan = async () => {
+    if (planEndDate < planStartDate) {
+      pushToast('End date cannot be earlier than start date', 'error');
+      return;
+    }
+    setPlanBusy(true);
+    try {
+      const created = await createStudyPlan({
+        startDate: planStartDate,
+        endDate: planEndDate,
+        availableMinutesPerDay: planMinutes,
+      });
+      if (created && Array.isArray(created.tasks) && created.tasks.length > 0) {
+        for (const t of created.tasks) {
+          addEvent({
+            id: t.task_id || crypto.randomUUID(),
+            date: t.scheduled_date,
+            title: t.title,
+            time: t.start_time || '09:00',
+            type: 'Study Session',
+            subject: t.subject_id || 'Academic Study',
+            notes: t.description || `${t.duration_minutes}m scheduled study task`,
+            completed: t.status === 'completed',
+          });
+        }
+        await reloadAppData();
+        pushToast(`Generated study plan with ${created.tasks.length} scheduled sessions!`);
+      } else {
+        // Fallback deterministic daily blocks across selected range if no topics seeded in DB yet
+        const start = new Date(planStartDate + 'T00:00:00');
+        const end = new Date(planEndDate + 'T00:00:00');
+        const focusSubject = nextExam?.subject || weakTopics[0]?.subject || 'Operating Systems';
+        const focusTopic = weakTopics[0]?.topic || 'Core Curriculum Concepts';
+        let countAdded = 0;
+        const cur = new Date(start);
+        while (cur <= end && countAdded < 14) {
+          const dStr = iso(cur);
+          addEvent({
+            id: crypto.randomUUID(),
+            date: dStr,
+            title: `Study Block: ${focusTopic} (${focusSubject})`,
+            time: '09:00 AM',
+            type: 'Study Session',
+            subject: focusSubject,
+            notes: `${Math.min(60, planMinutes)}m planned study session`,
+            completed: false,
+          });
+          countAdded += 1;
+          cur.setDate(cur.getDate() + 1);
+        }
+        pushToast(`Created ${countAdded}-day study plan in your calendar!`);
+      }
+      setPlanModalOpen(false);
+    } finally {
+      setPlanBusy(false);
+    }
   };
 
   const startFocus = (minutes: number) => {
@@ -206,7 +278,9 @@ export default function Planner() {
             <span className="section-kicker text-[var(--color-green-accent)]">REVISION PIPELINE</span>
             <span className="soft-badge text-[.6rem]">Curriculum Driven</span>
           </div>
-          <span className="text-[.65rem] text-[var(--color-text-muted)] font-medium">Revision Intelligence</span>
+          <button className="btn secondary text-xs" onClick={() => setPlanModalOpen(true)}>
+            <Sparkles size={13} /> Generate Multi-Day Study Plan
+          </button>
         </div>
 
         {nextExam || primaryWeak ? (
@@ -270,7 +344,7 @@ export default function Planner() {
           <div className="p-4 text-center text-xs text-[var(--color-text-muted)] flex flex-col items-center gap-2">
             <span>Schedule an exam or take an assessment quiz to automatically generate target revision tasks tailored to your weak areas.</span>
             <div className="flex gap-2 mt-1">
-              <button className="btn secondary text-xs" onClick={() => openAdd()}>
+              <button className="btn secondary text-xs" onClick={() => openAdd(selectedDate, 'Exam')}>
                 <Plus size={13} /> Add exam to calendar
               </button>
               <button className="btn primary text-xs" onClick={() => navigate('/assessment')}>
@@ -311,7 +385,7 @@ export default function Planner() {
             {month} {year}
           </h2>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <div className="view-switch">
             {(['Day', 'Week', 'Month'] as const).map(v => (
               <button key={v} onClick={() => setView(v)} className={view === v ? 'active' : ''}>
@@ -319,6 +393,9 @@ export default function Planner() {
               </button>
             ))}
           </div>
+          <button className="btn secondary" onClick={() => setPlanModalOpen(true)}>
+            <Sparkles size={15} /> Create Study Plan
+          </button>
           <button className="btn primary" onClick={() => openAdd()}>
             <Plus size={15} /> Add event
           </button>
@@ -388,23 +465,18 @@ export default function Planner() {
 
           <div className="card p-4 mt-4">
             <div className="section-title-row">
-              <h3>Today's Tasks</h3>
+              <h3>Today&apos;s Tasks</h3>
               <span className="soft-badge">
                 {plannerTasks.filter(t => t.completed).length}/{plannerTasks.length}
               </span>
             </div>
-            {plannerTasks.length === 0 ? (
-              <div className="p-4 text-center text-xs text-[var(--color-text-muted)] flex flex-col items-center gap-1.5">
-                <span className="text-xl">📅</span>
-                <b className="text-[var(--color-text-dark)]">Your study plan is empty.</b>
-                <span>Create a study task to get started.</span>
-                <button className="btn secondary text-xs mt-1" onClick={() => openAdd(iso(today))}>
-                  <Plus size={13} /> Add Task
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-1 mt-2">
-                {plannerTasks.slice(0, 6).map(t => (
+            <div className="space-y-1 mt-2">
+              {plannerTasks.length === 0 ? (
+                <div className="text-xs text-[var(--color-text-muted)] py-3 text-center">
+                  No daily tasks yet. Click &quot;Create Study Plan&quot; to schedule daily study blocks.
+                </div>
+              ) : (
+                plannerTasks.slice(0, 6).map(t => (
                   <div className="focus-item" key={t.id}>
                     <button
                       className={`check ${t.completed ? 'done' : ''}`}
@@ -414,15 +486,15 @@ export default function Planner() {
                       {t.completed && <Check size={13} />}
                     </button>
                     <div>
-                      <b className={t.completed ? 'line-through opacity-50' : ''}>{t.title}</b>
+                      <b>{t.title}</b>
                       <small>
                         {t.time} · {t.duration}
                       </small>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
+                ))
+              )}
+            </div>
           </div>
         </div>
 
@@ -446,58 +518,34 @@ export default function Planner() {
             </div>
             <div className="event-list mt-5">
               {visibleEvents.length ? (
-                visibleEvents.map(e => {
-                  const isOverdue = !e.completed && e.date < iso(today);
-                  const isToday = !e.completed && e.date === iso(today);
-                  return (
-                    <div
-                      className={`event-row ${e.completed ? 'completed-row' : isOverdue ? 'overdue-row' : isToday ? 'today-row' : ''}`}
-                      key={e.id}
+                visibleEvents.map(e => (
+                  <div className="event-row" key={e.id}>
+                    <div className="event-time">{e.time || 'All day'}</div>
+                    <div className={`event-dot ${e.type.toLowerCase().replaceAll(' ', '-')}`} />
+                    <button className="event-content" onClick={() => openEdit(e)}>
+                      <b className={e.completed ? 'line-through opacity-50' : ''}>{e.title}</b>
+                      <small>
+                        {e.date} · {e.type}
+                        {e.subject ? ` · ${e.subject}` : ''}
+                        {e.notes ? ` · ${e.notes}` : ''}
+                      </small>
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={() => updateEvent(e.id, { completed: !e.completed })}
+                      aria-label="Toggle complete"
                     >
-                      <div className="event-time">{e.time || 'All day'}</div>
-                      <div className={`event-dot ${e.type.toLowerCase().replaceAll(' ', '-')}`} />
-                      <button className="event-content text-left" onClick={() => openEdit(e)}>
-                        <div className="flex items-center gap-2">
-                          <b className={e.completed ? 'line-through opacity-50' : ''}>{e.title}</b>
-                          {isOverdue && (
-                            <span className="text-[0.62rem] font-bold text-red-600 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/40 px-1.5 py-0.2 rounded">
-                              Overdue
-                            </span>
-                          )}
-                          {isToday && (
-                            <span className="text-[0.62rem] font-bold text-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/40 px-1.5 py-0.2 rounded">
-                              Today
-                            </span>
-                          )}
-                          {e.completed && (
-                            <span className="text-[0.62rem] font-bold text-[var(--color-text-muted)] bg-black/5 dark:bg-white/10 px-1.5 py-0.2 rounded">
-                              Done
-                            </span>
-                          )}
-                        </div>
-                        <small>
-                          {e.type}
-                          {e.subject ? ` · ${e.subject}` : ''}
-                          {e.notes ? ` · ${e.notes}` : ''}
-                        </small>
-                      </button>
-                      <button
-                        className="icon-button"
-                        onClick={() => updateEvent(e.id, { completed: !e.completed })}
-                        aria-label={e.completed ? 'Mark incomplete' : 'Mark complete'}
-                      >
-                        {e.completed ? <Check size={15} /> : <span>○</span>}
-                      </button>
-                      <button
-                        className="icon-button danger"
-                        onClick={() => deleteEvent(e.id)}
-                        aria-label="Delete event"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  );
-                })
+                      {e.completed ? <Check size={15} /> : <span>○</span>}
+                    </button>
+                    <button
+                      className="icon-button danger"
+                      onClick={() => deleteEvent(e.id)}
+                      aria-label="Delete event"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
               ) : (
                 <div className="empty-state">
                   <CalendarDays size={28} />
@@ -540,8 +588,8 @@ export default function Planner() {
             <div className="section-kicker">AI STUDY STRATEGY</div>
             <h3 className="mt-1">Prioritize what is closest to an exam.</h3>
             <p className="muted text-xs mt-2 leading-relaxed">
-              {upcomingExams && upcomingExams.length > 0
-                ? `${upcomingExams[0].title || upcomingExams[0].subjectId || 'Upcoming exam'} is in ${upcomingExams[0].daysUntilExam ?? 'a few'} days. Schedule 45-minute daily blocks to review key concepts.`
+              {nextExam
+                ? `${nextExam.examName} (${nextExam.subject}) is in ${nextExam.daysLeft} days. Schedule 45-minute daily blocks to review key concepts.`
                 : 'Review your course materials and practice key topics with 45-minute daily study blocks.'}
             </p>
             <button
@@ -549,7 +597,7 @@ export default function Planner() {
               onClick={() => {
                 setSelectedDate(iso(today));
                 setView('Day');
-                openAdd(iso(today));
+                openAdd(iso(today), 'Study Session');
               }}
             >
               Schedule next study block
@@ -559,7 +607,7 @@ export default function Planner() {
       </div>
 
       {/* Add / Edit Event Modal */}
-      <Modal open={taskOpen} onClose={() => setTaskOpen(false)} title={editEvent ? 'Edit event' : 'Add to planner'}>
+      <Modal open={taskOpen} onClose={() => setTaskOpen(false)} title={editEvent ? 'Edit event or reschedule' : 'Add to planner'}>
         <div className="form-grid">
           <label>
             Title
@@ -588,7 +636,7 @@ export default function Planner() {
         </div>
         <label>
           Subject
-          <input className="input" value={subject} onChange={e => setSubject(e.target.value)} />
+          <input className="input" value={subject} onChange={e => setSubject(e.target.value)} placeholder="Operating Systems" />
         </label>
         <label>
           Notes
@@ -612,6 +660,56 @@ export default function Planner() {
           )}
           <button className="btn primary" onClick={save}>
             <Pencil size={14} /> {editEvent ? 'Save changes' : 'Add event'}
+          </button>
+        </div>
+      </Modal>
+
+      {/* Generate Study Plan Modal */}
+      <Modal
+        open={planModalOpen}
+        onClose={() => !planBusy && setPlanModalOpen(false)}
+        title="Create Exam-Aware Study Plan"
+        subtitle="Generates daily non-overlapping study sessions prioritized by upcoming exams and weak topics."
+      >
+        <div className="form-grid">
+          <label>
+            Start Date
+            <input
+              className="input"
+              type="date"
+              value={planStartDate}
+              onChange={e => setPlanStartDate(e.target.value)}
+            />
+          </label>
+          <label>
+            End Date
+            <input
+              className="input"
+              type="date"
+              value={planEndDate}
+              onChange={e => setPlanEndDate(e.target.value)}
+            />
+          </label>
+        </div>
+        <label>
+          Available Study Minutes Per Day
+          <select
+            className="select full"
+            value={planMinutes}
+            onChange={e => setPlanMinutes(Number(e.target.value))}
+          >
+            <option value={60}>60 minutes / day</option>
+            <option value={90}>90 minutes / day</option>
+            <option value={120}>120 minutes / day (Recommended)</option>
+            <option value={180}>180 minutes / day</option>
+          </select>
+        </label>
+        <div className="modal-actions mt-4">
+          <button className="btn secondary" onClick={() => setPlanModalOpen(false)} disabled={planBusy}>
+            Cancel
+          </button>
+          <button className="btn primary" onClick={handleGenerateStudyPlan} disabled={planBusy}>
+            <Sparkles size={14} /> {planBusy ? 'Generating Plan…' : 'Generate Study Plan'}
           </button>
         </div>
       </Modal>

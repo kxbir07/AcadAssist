@@ -73,7 +73,7 @@ data/sample/*
 data/uploads/
 data/processed/
 data/vector_store/
-storage/
+/storage/
 data/storage/
 data/*.db
 output/
@@ -84,6 +84,7 @@ tmp/
 
 # Node & Frontend
 node_modules/
+frontend/node_modules/
 frontend/dist/
 frontend/.temp/
 
